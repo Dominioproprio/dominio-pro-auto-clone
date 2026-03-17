@@ -21,6 +21,7 @@ import {
   Calendar, RefreshCw,
 } from "lucide-react";
 import { clientsStore, appointmentsStore, type Client } from "@/lib/store";
+import { Smartphone } from "lucide-react";
 
 const STATUS_LABELS: Record<string, string> = {
   scheduled: "Agendado", confirmed: "Confirmado", in_progress: "Em andamento",
@@ -36,6 +37,7 @@ export default function ClientesPage() {
   const [clearingAll, setClearingAll] = useState(false);
   const [loading, setLoading] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [searchingContacts, setSearchingContacts] = useState(false);
 
   useEffect(() => {
     const onUpdate = () => setRefreshKey(k => k + 1);
@@ -75,6 +77,79 @@ export default function ClientesPage() {
     setEditingId(null);
     setForm({ name: "", email: "", phone: "", birthDate: "", cpf: "", address: "", notes: "" });
     setModalOpen(true);
+  };
+
+  // Funcao para buscar contatos do celular
+  const handleSearchPhoneContacts = async () => {
+    setSearchingContacts(true);
+    try {
+      // Verifica se o navegador suporta a Contacts API
+      if (!('contacts' in navigator)) {
+        toast.error("Seu navegador nao suporta acesso a contatos");
+        setSearchingContacts(false);
+        return;
+      }
+
+      // Solicita permissao para acessar contatos
+      const contacts = await (navigator as any).contacts.select(
+        ['name', 'tel', 'email'],
+        { multiple: true }
+      );
+
+      if (!contacts || contacts.length === 0) {
+        toast.info("Nenhum contato selecionado");
+        setSearchingContacts(false);
+        return;
+      }
+
+      // Processa cada contato selecionado
+      let addedCount = 0;
+      for (const contact of contacts) {
+        const name = contact.name?.[0] || "";
+        const phone = contact.tel?.[0] || "";
+        const email = contact.email?.[0] || "";
+
+        if (!name.trim()) continue;
+
+        // Verifica se o cliente ja existe
+        const exists = clients.some(c => c.name.toLowerCase() === name.toLowerCase());
+        if (!exists) {
+          try {
+            await clientsStore.create({
+              name: name.trim(),
+              phone: phone || null,
+              email: email || null,
+              birthDate: null,
+              cpf: null,
+              address: null,
+              notes: null,
+            });
+            addedCount++;
+          } catch (err) {
+            console.error(`Erro ao adicionar ${name}:`, err);
+          }
+        }
+      }
+
+      if (addedCount > 0) {
+        toast.success(`${addedCount} contato(s) importado(s) com sucesso!`);
+        setRefreshKey(k => k + 1);
+      } else {
+        toast.info("Todos os contatos ja estao cadastrados");
+      }
+    } catch (err: any) {
+      // Trata erro de permissao ou cancelamento
+      if (err.name === 'SecurityError' || err.name === 'NotAllowedError') {
+        toast.error("Permissao negada para acessar contatos");
+      } else if (err.name === 'AbortError') {
+        toast.info("Selecao de contatos cancelada");
+      } else {
+        console.error("Erro ao buscar contatos:", err);
+        toast.error("Erro ao buscar contatos do celular");
+      }
+    } finally {
+      setSearchingContacts(false);
+    }
   };
 
   const openEdit = (client: Client) => {
@@ -154,6 +229,16 @@ export default function ClientesPage() {
           <p className="text-sm text-muted-foreground">{clients.length} cadastrados</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            onClick={handleSearchPhoneContacts}
+            disabled={searchingContacts}
+            variant="outline"
+            className="gap-2 text-xs bg-transparent"
+            title="Importar contatos do seu celular"
+          >
+            <Smartphone className="w-3.5 h-3.5" />
+            {searchingContacts ? "Carregando..." : "Importar Contatos"}
+          </Button>
           {clients.length > 0 && (
             <Button onClick={() => setClearAllOpen(true)} variant="outline" className="gap-2 text-destructive hover:text-destructive bg-transparent text-xs">
               <Trash2 className="w-3.5 h-3.5" />Limpar Tudo
