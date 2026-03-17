@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { ChevronLeft, ChevronRight, Plus, Calendar, CalendarDays, RefreshCw, Clock, Link2, Search } from "lucide-react";
 import { Calendar as CalendarUI } from "@/components/ui/calendar";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import AppointmentModal from "@/components/AppointmentModal";
 import { cn } from "@/lib/utils";
 import {
@@ -478,46 +479,52 @@ export default function AgendaPage() {
     };
 
     const onUp = async (e: PointerEvent) => {
-      const deltaY = e.clientY - dragStartY.current;
-      const deltaMin = snapToGrid((deltaY / HOUR_HEIGHT) * 60, SNAP_MINUTES);
-      const targetEmpId = getEmpAtX(e.clientX) ?? dragging.employeeId;
+      if (!dragging) return;
 
-      const oldStart = new Date(dragging.startTime);
-      const newStart = new Date(oldStart.getTime() + deltaMin * 60000);
-      const dur      = new Date(dragging.endTime).getTime() - oldStart.getTime();
-      const newEnd   = new Date(newStart.getTime() + dur);
-
-      setDragging(null);
-      setDragOverEmpId(null);
-
-      if (newStart.getHours() < START_HOUR || newEnd.getHours() > END_HOUR) {
-        toast.error("Horário fora do expediente");
+      const targetEmpId = getEmpAtX(e.clientX);
+      if (!targetEmpId) {
+        setDragging(null);
         return;
       }
 
-      if (deltaMin !== 0 || targetEmpId !== dragging.employeeId) {
-        // Atualização otimista: aplica no cache imediatamente para não sumir
+      const rect = gridRef.current?.querySelector<HTMLElement>(`[data-emp-id="${targetEmpId}"]`)?.getBoundingClientRect();
+      if (!rect) {
+        setDragging(null);
+        return;
+      }
+
+      const y = e.clientY - rect.top;
+      const totalMinutes = (y / HOUR_HEIGHT) * 60 + START_HOUR * 60;
+      const snapped = snapToGrid(totalMinutes, SNAP_MINUTES);
+      const hour = Math.floor(snapped / 60);
+      const minute = snapped % 60;
+
+      const newStart = new Date(currentDate);
+      newStart.setHours(hour, minute, 0, 0);
+      const duration = (new Date(dragging.endTime).getTime() - new Date(dragging.startTime).getTime()) / 1000 / 60;
+      const newEnd = new Date(newStart.getTime() + duration * 60_000);
+
+      // Atualiza cache local imediatamente
+      appointmentsStore.updateLocal(dragging.id, {
+        employeeId: targetEmpId,
+        startTime: newStart.toISOString(),
+        endTime: newEnd.toISOString(),
+      });
+      setRefreshKey(k => k + 1);
+
+      // Persiste no Supabase em background
+      try {
+        await appointmentsStore.move(dragging.id, targetEmpId, newStart.toISOString(), newEnd.toISOString());
+        toast.success("Agendamento reagendado!");
+      } catch {
+        toast.error("Erro ao mover — revertendo");
+        // Reverte: restaura posição original no cache
         appointmentsStore.updateLocal(dragging.id, {
-          employeeId: targetEmpId,
-          startTime: newStart.toISOString(),
-          endTime: newEnd.toISOString(),
+          employeeId: dragging.employeeId,
+          startTime: dragging.startTime,
+          endTime: dragging.endTime,
         });
         setRefreshKey(k => k + 1);
-
-        // Persiste no Supabase em background
-        try {
-          await appointmentsStore.move(dragging.id, targetEmpId, newStart.toISOString(), newEnd.toISOString());
-          toast.success("Agendamento reagendado!");
-        } catch {
-          toast.error("Erro ao mover — revertendo");
-          // Reverte: restaura posição original no cache
-          appointmentsStore.updateLocal(dragging.id, {
-            employeeId: dragging.employeeId,
-            startTime: dragging.startTime,
-            endTime: dragging.endTime,
-          });
-          setRefreshKey(k => k + 1);
-        }
       }
     };
 
@@ -572,19 +579,6 @@ export default function AgendaPage() {
 
   const completedCount = appointments.filter(a => a.status === "completed").length;
   const [showDatePicker, setShowDatePicker] = useState(false);
-  const datePickerRef = useRef<HTMLDivElement>(null);
-
-  // Fechar date picker ao clicar fora
-  useEffect(() => {
-    if (!showDatePicker) return;
-    const handler = (e: MouseEvent) => {
-      if (datePickerRef.current && !datePickerRef.current.contains(e.target as Node)) {
-        setShowDatePicker(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [showDatePicker]);
 
   return (
     <div className="flex flex-col h-full" style={{ userSelect: dragging ? "none" : undefined }}>
@@ -596,39 +590,19 @@ export default function AgendaPage() {
             <ChevronLeft className="w-3 h-3" />
           </Button>
 
-          {/* Chip de data + ícone calendário */}
-          <div className="relative" ref={datePickerRef}>
-            <div className="flex items-center gap-1.5 min-w-0 px-2.5 py-1 rounded-lg bg-white/90">
-              <span className="text-xs md:text-sm font-semibold text-gray-900 capitalize truncate max-w-[140px] md:max-w-none">
-                {formattedDate}
-              </span>
-              <button
-                onClick={() => setShowDatePicker(v => !v)}
-                title="Ir para data"
-                className="flex-shrink-0 ml-1"
-              >
-                <Calendar className="w-3.5 h-3.5 text-primary hover:opacity-70 transition-opacity" />
-              </button>
-            </div>
-
-            {/* Calendário popup */}
-            {showDatePicker && (
-              <div
-                className="fixed z-[99999] bg-card border border-border rounded-xl p-3 shadow-2xl min-w-[280px]"
-                style={{
-                  top: (() => {
-                    const el = datePickerRef.current;
-                    if (el) return el.getBoundingClientRect().bottom + 8;
-                    return 80;
-                  })(),
-                  left: (() => {
-                    const el = datePickerRef.current;
-                    if (el) return Math.min(el.getBoundingClientRect().left, window.innerWidth - 300);
-                    return 20;
-                  })()
-                }}
-              >
-                <div className="flex items-center justify-between mb-2 px-1">
+          {/* Chip de data + ícone calendário com Popover */}
+          <Popover open={showDatePicker} onOpenChange={setShowDatePicker}>
+            <PopoverTrigger asChild>
+              <div className="flex items-center gap-1.5 min-w-0 px-2.5 py-1 rounded-lg bg-white/90 cursor-pointer hover:bg-white transition-colors">
+                <span className="text-xs md:text-sm font-semibold text-gray-900 capitalize truncate max-w-[140px] md:max-w-none">
+                  {formattedDate}
+                </span>
+                <Calendar className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+              </div>
+            </PopoverTrigger>
+            <PopoverContent className="w-auto p-0 bg-white shadow-lg" align="start">
+              <div className="p-3 bg-white">
+                <div className="flex items-center justify-between mb-3">
                   <p className="text-sm font-bold text-foreground">Selecionar Data</p>
                   <Button
                     variant="ghost"
@@ -642,25 +616,23 @@ export default function AgendaPage() {
                     Hoje
                   </Button>
                 </div>
-                <div className="bg-background/50 rounded-lg border border-border/50 overflow-hidden">
-                  <CalendarUI
-                    mode="single"
-                    selected={parseISO(selectedDate)}
-                    onSelect={(date) => {
-                      if (date) {
-                        const newDate = format(date, "yyyy-MM-dd");
-                        setShowDatePicker(false);
-                        setSelectedDate(newDate);
-                      }
-                    }}
-                    locale={ptBR}
-                    initialFocus
-                    className="p-2"
-                  />
-                </div>
+                <CalendarUI
+                  mode="single"
+                  selected={parseISO(selectedDate)}
+                  onSelect={(date) => {
+                    if (date) {
+                      const newDate = format(date, "yyyy-MM-dd");
+                      setSelectedDate(newDate);
+                      setShowDatePicker(false);
+                    }
+                  }}
+                  locale={ptBR}
+                  initialFocus
+                  disabled={(date) => false}
+                />
               </div>
-            )}
-          </div>
+            </PopoverContent>
+          </Popover>
 
           <Button variant="outline" size="icon" onClick={() => navigateDate(1)} className="h-8 w-8 bg-transparent">
             <ChevronRight className="w-3 h-3" />
