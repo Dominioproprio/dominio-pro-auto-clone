@@ -34,11 +34,19 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
-    <script
-      type="module"
-      defer
-      src="%VITE_ANALYTICS_ENDPOINT%/umami"
-      data-website-id="%VITE_ANALYTICS_WEBSITE_ID%"></script>
+    <script type="module">
+      const endpoint = import.meta.env.VITE_ANALYTICS_ENDPOINT;
+      const websiteId = import.meta.env.VITE_ANALYTICS_WEBSITE_ID;
+      
+      if (endpoint && websiteId) {
+        const script = document.createElement('script');
+        script.async = true;
+        script.defer = true;
+        script.src = `${endpoint}/umami`;
+        script.setAttribute('data-website-id', websiteId);
+        document.head.appendChild(script);
+      }
+    </script>
 
     <!-- Registro do Service Worker -->
     <script>
