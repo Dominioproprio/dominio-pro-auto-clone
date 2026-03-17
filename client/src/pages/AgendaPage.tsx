@@ -557,7 +557,7 @@ export default function AgendaPage() {
       window.removeEventListener("pointercancel", onCancel);
       document.removeEventListener("pointerleave", onCancel);
     };
-  }, [dragging, getEmpAtX, START_HOUR, END_HOUR, SNAP_MINUTES, currentDate];
+  }, [dragging, getEmpAtX, START_HOUR, END_HOUR, SNAP_MINUTES, currentDate]);
 
   // ── Drag start ────────────────────────────────────────────────────────────
   const handleDragStart = useCallback((appt: Appointment, y: number, x: number) => {
