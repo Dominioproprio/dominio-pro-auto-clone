@@ -648,8 +648,11 @@ export default function AgendaPage() {
                     selected={parseISO(selectedDate)}
                     onSelect={(date) => {
                       if (date) {
-                        setSelectedDate(format(date, "yyyy-MM-dd"));
-                        setShowDatePicker(false);
+                        const newDate = format(date, "yyyy-MM-dd");
+                        setSelectedDate(newDate);
+                        setTimeout(() => {
+                          setShowDatePicker(false);
+                        }, 100);
                       }
                     }}
                     locale={ptBR}
@@ -795,3 +798,4 @@ export default function AgendaPage() {
     </div>
   );
 }
+
