@@ -51,7 +51,9 @@ function findDuplicateGroups(clients: Client[]): Map<string, Client[]> {
 function mergeClientGroup(group: Client[]): { keep: Client; removeIds: number[] } {
   // Ordena por data de criação (mais antigo primeiro)
   const sorted = [...group].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  const keep = sorted[0];
+  
+  // Criamos uma cópia profunda do objeto 'keep' para não alterar o cache diretamente antes do update
+  const keep = { ...sorted[0] };
   const removeIds: number[] = [];
 
   // Mescla dados: preenche campos vazios do "keep" com dados dos outros
@@ -59,9 +61,12 @@ function mergeClientGroup(group: Client[]): { keep: Client; removeIds: number[] 
     if (!keep.email && other.email) keep.email = other.email;
     if (!keep.phone && other.phone) keep.phone = other.phone;
     if (!keep.birthDate && other.birthDate) keep.birthDate = other.birthDate;
+    if (!keep.cpf && other.cpf) keep.cpf = other.cpf;
+    if (!keep.address && other.address) keep.address = other.address;
+    
     if (!keep.notes && other.notes) {
       keep.notes = other.notes;
-    } else if (keep.notes && other.notes && keep.notes !== other.notes) {
+    } else if (keep.notes && other.notes && !keep.notes.includes(other.notes)) {
       keep.notes = `${keep.notes} | ${other.notes}`;
     }
     removeIds.push(other.id);
@@ -341,6 +346,8 @@ export default function FerramentasClientesPage() {
         email: keep.email,
         phone: keep.phone,
         birthDate: keep.birthDate,
+        cpf: keep.cpf,
+        address: keep.address,
         notes: keep.notes,
       });
 
@@ -378,6 +385,8 @@ export default function FerramentasClientesPage() {
           email: keep.email,
           phone: keep.phone,
           birthDate: keep.birthDate,
+          cpf: keep.cpf,
+          address: keep.address,
           notes: keep.notes,
         });
         const allAppts = appointmentsStore.list({});
