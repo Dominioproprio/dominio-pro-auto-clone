@@ -16,7 +16,6 @@ import AppointmentModal from "@/components/AppointmentModal";
 import { cn } from "@/lib/utils";
 import {
   employeesStore, servicesStore, appointmentsStore,
-  fetchAllData,
   type Appointment,
 } from "@/lib/store";
 
@@ -395,20 +394,11 @@ export default function AgendaPage() {
   const [refreshKey, setRefreshKey]       = useState(0);
   const [refreshing, setRefreshing]       = useState(false);
 
-  const handleRefresh = useCallback(async () => {
-    if (refreshing) return;
+  const handleRefresh = useCallback(() => {
+    // Recarrega o app inteiro — limpa cache in-memory e busca tudo do zero no Supabase
     setRefreshing(true);
-    try {
-      await fetchAllData();
-      setRefreshKey(k => k + 1);
-      window.dispatchEvent(new Event("store_updated"));
-      toast.success("Agenda atualizada!");
-    } catch {
-      toast.error("Erro ao atualizar");
-    } finally {
-      setRefreshing(false);
-    }
-  }, [refreshing]);
+    window.location.reload();
+  }, []);
 
   // Horários/slots dinâmicos vindos de Configurações
   const [schedCfg, setSchedCfg] = useState(loadScheduleConfig);
