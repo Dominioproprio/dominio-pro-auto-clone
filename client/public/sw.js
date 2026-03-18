@@ -1,7 +1,7 @@
-// Service Worker — Salão Bella PWA
-// Estratégia: Cache First para assets estáticos, Network First para dados
+// Service Worker — Domínio Pro PWA
+// Estratégia: Network First para JS/CSS (detecta updates), Cache First para imagens/ícones
 
-const CACHE_NAME = "salao-bella-v1";
+const CACHE_VERSION = "dominio-pro-v3";
 const STATIC_ASSETS = [
   "/",
   "/manifest.json",
@@ -12,10 +12,9 @@ const STATIC_ASSETS = [
 // Instala e faz cache dos assets essenciais
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(STATIC_ASSETS);
-    })
+    caches.open(CACHE_VERSION).then((cache) => cache.addAll(STATIC_ASSETS))
   );
+  // Força ativação imediata — não espera fechar todas as abas
   self.skipWaiting();
 });
 
@@ -25,12 +24,11 @@ self.addEventListener("activate", (event) => {
     caches.keys().then((keys) =>
       Promise.all(
         keys
-          .filter((key) => key !== CACHE_NAME)
+          .filter((key) => key !== CACHE_VERSION)
           .map((key) => caches.delete(key))
       )
-    )
+    ).then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
 // Intercepta requisições
@@ -38,17 +36,32 @@ self.addEventListener("fetch", (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // Ignora requisições não-GET e externas
   if (request.method !== "GET") return;
   if (url.origin !== location.origin) return;
 
-  // Para navegação (HTML): Network First, fallback para cache
+  // JS e CSS: Network First — garante que updates chegam imediatamente
+  if (url.pathname.match(/\.(js|css)$/)) {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.ok) {
+            const clone = response.clone();
+            caches.open(CACHE_VERSION).then((cache) => cache.put(request, clone));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request))
+    );
+    return;
+  }
+
+  // HTML (navegação): Network First, fallback para cache
   if (request.mode === "navigate") {
     event.respondWith(
       fetch(request)
         .then((response) => {
           const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+          caches.open(CACHE_VERSION).then((cache) => cache.put(request, clone));
           return response;
         })
         .catch(() => caches.match("/") || caches.match(request))
@@ -56,17 +69,24 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Para assets estáticos (JS, CSS, imagens): Cache First
+  // Imagens e ícones: Cache First
   event.respondWith(
     caches.match(request).then((cached) => {
       if (cached) return cached;
       return fetch(request).then((response) => {
         if (response.ok) {
           const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+          caches.open(CACHE_VERSION).then((cache) => cache.put(request, clone));
         }
         return response;
       });
     })
   );
+});
+
+// Mensagem do app para forçar update
+self.addEventListener("message", (event) => {
+  if (event.data === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
 });
