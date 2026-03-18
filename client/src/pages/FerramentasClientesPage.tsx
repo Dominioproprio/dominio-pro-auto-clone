@@ -2,7 +2,7 @@
  * FerramentasClientesPage — Importar cadastro de clientes, detectar e mesclar duplicados.
  * Design: Glass Dashboard — tema escuro, accent rosa, backdrop-blur.
  */
-import { useState, useMemo, useRef, useCallback } from "react";
+import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -219,7 +219,17 @@ export default function FerramentasClientesPage() {
 
   const refresh = () => setRefreshKey(k => k + 1);
 
-  // ─── Importação ─────────────────────────────────────────
+  useEffect(() => {
+    const onUpdate = () => setRefreshKey(k => k + 1);
+    window.addEventListener("clients_updated", onUpdate);
+    window.addEventListener("store_updated", onUpdate);
+    return () => {
+      window.removeEventListener("clients_updated", onUpdate);
+      window.removeEventListener("store_updated", onUpdate);
+    };
+  }, []);
+
+
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -316,6 +326,7 @@ export default function FerramentasClientesPage() {
     setImporting(true);
     try {
       await clientsStore.createMany(importPreview);
+      await clientsStore.fetchAll();
       toast.success(`${importPreview.length} cliente(s) importado(s) com sucesso!`);
       setImportModalOpen(false);
       setImportPreview([]);
