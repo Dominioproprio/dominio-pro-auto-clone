@@ -3,6 +3,7 @@
  */
 import { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
+import { THEME_PALETTES } from "@/components/DominioLayout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -26,6 +27,7 @@ interface SalonConfig {
   notifyEmail: boolean;
   autoOpenCash: boolean;
   accentColor: string;
+  themeId: string;
   logoUrl: string;
   bgType: BgType;
   bgColor: string;
@@ -46,6 +48,7 @@ const DEFAULT_CONFIG: SalonConfig = {
   notifyEmail: false,
   autoOpenCash: true,
   accentColor: "#ec4899",
+  themeId: "rosa-neon",
   logoUrl: "",
   bgType: "default",
   bgColor: "#09091a",
@@ -254,6 +257,39 @@ export default function ConfiguracoesPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-6">
+
+          {/* Seletor de tema */}
+          <div className="space-y-3">
+            <Label>Tema do app</Label>
+            <div className="grid grid-cols-2 gap-2">
+              {THEME_PALETTES.map(t => (
+                <button key={t.id} type="button"
+                  onClick={() => {
+                    updateConfig("themeId", t.id);
+                    updateConfig("accentColor", t.accent);
+                    applyAccentColor(t.accent);
+                    updateConfig("bgType", "default");
+                  }}
+                  className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border-2 transition-all text-left"
+                  style={{
+                    backgroundColor: t.bg,
+                    borderColor: config.themeId === t.id ? t.accent : "transparent",
+                    boxShadow: config.themeId === t.id ? `0 0 12px ${t.accent}50` : "none",
+                  }}>
+                  <div className="w-6 h-6 rounded-full flex-shrink-0"
+                    style={{ background: `linear-gradient(135deg, ${t.accent}, ${t.accent}88)` }} />
+                  <span className="text-xs font-semibold" style={{ color: config.themeId === t.id ? t.accent : "#fff" }}>
+                    {t.name}
+                  </span>
+                  {config.themeId === t.id && (
+                    <span className="ml-auto text-xs" style={{ color: t.accent }}>✓</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <Separator />
 
           {/* Cor de acento */}
           <div className="space-y-2">
