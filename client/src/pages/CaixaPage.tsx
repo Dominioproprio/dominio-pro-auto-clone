@@ -99,30 +99,43 @@ export default function CaixaPage() {
       setRefreshKey(k => k + 1);
       toast.success("Lançamento automático criado!");
     };
+    const onAutoClosed = () => {
+      setRefreshKey(k => k + 1);
+      toast.info("Caixa fechado automaticamente à meia-noite.");
+    };
     window.addEventListener("cash_entry_auto_launched", onAutoLaunch);
-    return () => window.removeEventListener("cash_entry_auto_launched", onAutoLaunch);
+    window.addEventListener("cash_session_auto_closed", onAutoClosed);
+    return () => {
+      window.removeEventListener("cash_entry_auto_launched", onAutoLaunch);
+      window.removeEventListener("cash_session_auto_closed", onAutoClosed);
+    };
   }, []);
 
   // ── Dados ──
   const currentSession  = useMemo(() => cashSessionsStore.getCurrent(), [refreshKey]);
   const sessions        = useMemo(() => cashSessionsStore.list(), [refreshKey]);
   const employees       = useMemo(() => employeesStore.list(false), [refreshKey]);
+  // Agendamentos do dia de hoje (para exibição na aba de hoje)
   const allAppointments = useMemo(() => appointmentsStore.list({ date: today }), [today, refreshKey]);
-  const entries         = useMemo(() =>
+
+  const entries = useMemo(() =>
     currentSession ? cashEntriesStore.list(currentSession.id) : [],
     [currentSession, refreshKey]
   );
 
-  // Agendamentos ainda não lançados no caixa (qualquer status exceto cancelled)
+  // Agendamentos não lançados desde a abertura da sessão (não só hoje)
+  // Necessário para sessões que cobrem múltiplos dias
   const launchableAppts = useMemo(() => {
     if (!currentSession) return [];
+    const sessionStart = currentSession.openedAt.slice(0, 10); // "yyyy-MM-dd"
+    const apptsSinceOpen = appointmentsStore.list({ startDate: sessionStart });
     const launchedIds = new Set(entries.filter(e => e.appointmentId).map(e => e.appointmentId!));
-    return allAppointments.filter(a =>
+    return apptsSinceOpen.filter(a =>
       !["cancelled"].includes(a.status) &&
       !launchedIds.has(a.id) &&
       toNum(a.totalPrice) > 0
     );
-  }, [allAppointments, entries, currentSession]);
+  }, [entries, currentSession, refreshKey]);
 
   // KPIs do caixa atual
   const totalRevenue     = entries.reduce((s, e) => s + e.amount, 0);
