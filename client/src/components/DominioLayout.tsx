@@ -63,6 +63,7 @@ function loadBackground(): React.CSSProperties {
 
 // ─── Paletas de tema ─────────────────────────────────────
 export const THEME_PALETTES = [
+  // ── Temas escuros ──────────────────────────────────────
   {
     id: "rosa-neon",
     name: "Rosa Neon",
@@ -71,6 +72,9 @@ export const THEME_PALETTES = [
     surface: "rgba(15,15,28,0.95)",
     card: "rgba(20,20,35,0.9)",
     border: "rgba(255,255,255,0.07)",
+    dark: true,
+    textColor: "#ffffff",
+    textMuted: "rgba(255,255,255,0.45)",
   },
   {
     id: "roxo-galaxy",
@@ -80,15 +84,21 @@ export const THEME_PALETTES = [
     surface: "rgba(14,10,28,0.95)",
     card: "rgba(20,15,40,0.9)",
     border: "rgba(255,255,255,0.07)",
+    dark: true,
+    textColor: "#ffffff",
+    textMuted: "rgba(255,255,255,0.45)",
   },
   {
-    id: "esmeralda",
-    name: "Esmeralda",
+    id: "esmeralda-dark",
+    name: "Esmeralda Noturno",
     accent: "#10b981",
     bg: "#060f0c",
     surface: "rgba(8,18,14,0.95)",
     card: "rgba(10,24,18,0.9)",
     border: "rgba(255,255,255,0.07)",
+    dark: true,
+    textColor: "#ffffff",
+    textMuted: "rgba(255,255,255,0.45)",
   },
   {
     id: "dourado",
@@ -98,6 +108,9 @@ export const THEME_PALETTES = [
     surface: "rgba(18,14,8,0.95)",
     card: "rgba(24,18,10,0.9)",
     border: "rgba(255,255,255,0.07)",
+    dark: true,
+    textColor: "#ffffff",
+    textMuted: "rgba(255,255,255,0.45)",
   },
   {
     id: "azul-oceano",
@@ -107,33 +120,94 @@ export const THEME_PALETTES = [
     surface: "rgba(8,16,30,0.95)",
     card: "rgba(10,22,40,0.9)",
     border: "rgba(255,255,255,0.07)",
+    dark: true,
+    textColor: "#ffffff",
+    textMuted: "rgba(255,255,255,0.45)",
   },
   {
-    id: "coral",
+    id: "coral-dark",
     name: "Coral Sunset",
     accent: "#f97316",
     bg: "#0f0808",
     surface: "rgba(20,10,10,0.95)",
     card: "rgba(28,14,14,0.9)",
     border: "rgba(255,255,255,0.07)",
+    dark: true,
+    textColor: "#ffffff",
+    textMuted: "rgba(255,255,255,0.45)",
+  },
+  // ── Temas claros ───────────────────────────────────────
+  {
+    id: "verde-pastel",
+    name: "Verde Pastel",
+    accent: "#3d6b47",
+    bg: "#d6e8d0",
+    surface: "rgba(210,232,204,0.97)",
+    card: "rgba(224,240,218,0.97)",
+    border: "rgba(61,107,71,0.15)",
+    dark: false,
+    textColor: "#1e3a22",
+    textMuted: "rgba(30,58,34,0.5)",
   },
   {
-    id: "aurora",
-    name: "Aurora",
-    accent: "#8b5cf6",
-    bg: "#0d0820",
-    surface: "rgba(14,10,30,0.92)",
-    card: "rgba(255,255,255,0.06)",
-    border: "rgba(255,255,255,0.10)",
+    id: "azul-pastel",
+    name: "Azul Céu",
+    accent: "#2563a8",
+    bg: "#cfe0f5",
+    surface: "rgba(208,226,245,0.97)",
+    card: "rgba(220,234,248,0.97)",
+    border: "rgba(37,99,168,0.15)",
+    dark: false,
+    textColor: "#0f2a4a",
+    textMuted: "rgba(15,42,74,0.5)",
   },
   {
-    id: "claro",
-    name: "Claro Minimal",
+    id: "lilas-pastel",
+    name: "Lilás Suave",
+    accent: "#6d3fa0",
+    bg: "#e8d8f5",
+    surface: "rgba(232,218,245,0.97)",
+    card: "rgba(240,228,250,0.97)",
+    border: "rgba(109,63,160,0.15)",
+    dark: false,
+    textColor: "#2e1250",
+    textMuted: "rgba(46,18,80,0.5)",
+  },
+  {
+    id: "rosa-pastel",
+    name: "Rosa Suave",
+    accent: "#b5376b",
+    bg: "#f5d6e4",
+    surface: "rgba(245,214,228,0.97)",
+    card: "rgba(250,226,238,0.97)",
+    border: "rgba(181,55,107,0.15)",
+    dark: false,
+    textColor: "#4a0f26",
+    textMuted: "rgba(74,15,38,0.5)",
+  },
+  {
+    id: "areia",
+    name: "Areia & Caramelo",
+    accent: "#92470a",
+    bg: "#f0e0c8",
+    surface: "rgba(240,224,200,0.97)",
+    card: "rgba(248,234,214,0.97)",
+    border: "rgba(146,71,10,0.15)",
+    dark: false,
+    textColor: "#3a1c06",
+    textMuted: "rgba(58,28,6,0.5)",
+  },
+  {
+    id: "branco-minimal",
+    name: "Branco Minimal",
     accent: "#ec4899",
-    bg: "#f0f0f8",
-    surface: "rgba(255,255,255,0.95)",
-    card: "rgba(255,255,255,0.95)",
+    bg: "#f4f4f8",
+    surface: "rgba(255,255,255,0.97)",
+    card: "rgba(255,255,255,0.97)",
     border: "rgba(0,0,0,0.08)",
+    dark: false,
+    textColor: "#111128",
+    textMuted: "rgba(17,17,40,0.45)",
   },
 ];
 
@@ -244,12 +318,12 @@ export default function DominioLayout({ children, onNewAppt }: {
             fontWeight: 700, fontSize: 16,
             letterSpacing: "0.15em",
             textTransform: "uppercase",
-            color: "#ffffff",
+            color: palette.textColor,
             textShadow: `0 0 20px ${accent}80`,
             textAlign: "center",
             lineHeight: 1.2,
           }}>{branding.name}</p>
-          <p style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", letterSpacing: "0.25em", marginTop: 3 }}>
+          <p style={{ fontSize: 10, color: palette.textMuted, letterSpacing: "0.25em", marginTop: 3 }}>
             PRO
           </p>
 
@@ -262,7 +336,7 @@ export default function DominioLayout({ children, onNewAppt }: {
 
         {/* Nav principal */}
         <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-1">
-          <p style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", letterSpacing: "0.2em", padding: "0 8px 8px" }}>
+          <p style={{ fontSize: 10, color: palette.textMuted, letterSpacing: "0.2em", padding: "0 8px 8px" }}>
             PRINCIPAL
           </p>
           {PRIMARY_NAV.map(({ path, label, icon: Icon }) => {
@@ -272,14 +346,15 @@ export default function DominioLayout({ children, onNewAppt }: {
                 className={cn(
                   "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200",
                   active
-                    ? "text-white"
-                    : "text-white/40 hover:text-white/80 hover:bg-white/5"
+                    ? ""
+                    : "hover:bg-black/5"
                 )}
                 style={active ? {
                   background: `linear-gradient(135deg, ${accent}25, ${accent}10)`,
                   border: `1px solid ${accent}30`,
                   boxShadow: `0 2px 12px ${accent}20`,
-                } : {}}
+                  color: palette.textColor,
+                } : { color: palette.textMuted }}
               >
                 <div className={cn(
                   "w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0",
@@ -296,7 +371,7 @@ export default function DominioLayout({ children, onNewAppt }: {
           })}
 
           <div className="pt-4">
-            <p style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", letterSpacing: "0.2em", padding: "0 8px 8px" }}>
+            <p style={{ fontSize: 10, color: palette.textMuted, letterSpacing: "0.2em", padding: "0 8px 8px" }}>
               GESTÃO
             </p>
             {SECONDARY_NAV.map(({ path, label, icon: Icon }) => {
@@ -305,12 +380,13 @@ export default function DominioLayout({ children, onNewAppt }: {
                 <button key={path} onClick={() => navigate(path)}
                   className={cn(
                     "w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-medium transition-all duration-200",
-                    active ? "text-white" : "text-white/35 hover:text-white/70 hover:bg-white/5"
+                    active ? "" : "hover:bg-black/5"
                   )}
                   style={active ? {
                     background: `linear-gradient(135deg, ${accent}20, ${accent}08)`,
                     border: `1px solid ${accent}25`,
-                  } : {}}
+                    color: palette.textColor,
+                  } : { color: palette.textMuted }}
                 >
                   <Icon className="w-3.5 h-3.5 flex-shrink-0" style={active ? { color: accent } : {}} />
                   <span>{label}</span>
@@ -329,7 +405,7 @@ export default function DominioLayout({ children, onNewAppt }: {
               <span>{theme === "dark" ? "Tema claro" : "Tema escuro"}</span>
             </button>
           )}
-          <p style={{ fontSize: 10, color: "rgba(255,255,255,0.15)", textAlign: "center", marginTop: 8 }}>
+          <p style={{ fontSize: 10, color: palette.textMuted, textAlign: "center", marginTop: 8 }}>
             Domínio Pro v2.0
           </p>
         </div>
@@ -360,7 +436,7 @@ export default function DominioLayout({ children, onNewAppt }: {
               fontWeight: 700, fontSize: 13,
               letterSpacing: "0.15em",
               textTransform: "uppercase",
-              color: "#ffffff",
+              color: palette.textColor,
               textShadow: `0 0 12px ${accent}80`,
             }}>{branding.name}</span>
           </div>
@@ -374,7 +450,7 @@ export default function DominioLayout({ children, onNewAppt }: {
               return cur ? (
                 <div className="flex items-center gap-2">
                   {Icon && <Icon className="w-4 h-4" style={{ color: accent }} />}
-                  <span className="text-sm font-semibold text-white/80">{cur.label}</span>
+                  <span className="text-sm font-semibold" style={{ color: palette.textMuted }}>{cur.label}</span>
                 </div>
               ) : null;
             })()}
@@ -422,6 +498,7 @@ export default function DominioLayout({ children, onNewAppt }: {
               return (
                 <button key={path} onClick={() => navigate(path)}
                   className="flex flex-col items-center gap-1 px-4 py-1.5 rounded-xl transition-all duration-200 min-w-0"
+                  style={{ color: active ? accent : palette.textMuted }}
                   style={active ? {
                     background: `${accent}18`,
                   } : {}}>
