@@ -40,6 +40,7 @@ interface SelectedService {
   price: number;
   durationMinutes: number;
   color: string;
+  materialCostPercent: number;
 }
 
 interface AppointmentModalProps {
@@ -155,6 +156,7 @@ export default function AppointmentModal({
             price: s.price,
             durationMinutes: svc?.durationMinutes ?? s.durationMinutes ?? 60,
             color: svc?.color ?? s.color ?? "#ec4899",
+            materialCostPercent: svc?.materialCostPercent ?? s.materialCostPercent ?? 0,
           };
         }));
       } else {
@@ -176,26 +178,39 @@ export default function AppointmentModal({
       setNotes("");
       
       // ─── Pré-preenchimento para clientes recorrentes ───
-      // Se há um cliente selecionado, busca seus últimos agendamentos
       if (clientId) {
-        const clientAppts = appointmentsStore.list({}).filter(a => a.clientId === clientId && a.status === "completed");
+        const allAppts = appointmentsStore.list({});
+        const clientAppts = allAppts
+          .filter(a => a.clientId === clientId && a.status === "completed")
+          .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
+
         if (clientAppts.length > 0) {
-          const lastAppt = clientAppts.sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime())[0];
-          
+          const lastAppt = clientAppts[0];
+
           // Pré-preenche com o funcionário anterior
           if (lastAppt.employeeId && !defaultEmployeeId) {
             setEmployeeId(String(lastAppt.employeeId));
           }
-          
-          // Pré-preenche com os serviços anteriores
-          if (lastAppt.services?.length && !groupClientName) {
-            setSelectedServices(lastAppt.services.map(s => ({
-              serviceId: s.serviceId,
-              name: s.name,
-              price: s.price,
-              durationMinutes: s.durationMinutes,
-              color: s.color,
-            })));
+
+          // Se o último agendamento faz parte de um grupo, reconstitui todos os serviços da visita
+          if (!groupClientName) {
+            let lastVisitServices = lastAppt.services ?? [];
+            if (lastAppt.groupId) {
+              const groupAppts = clientAppts
+                .filter(a => a.groupId === lastAppt.groupId)
+                .sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
+              lastVisitServices = groupAppts.flatMap(a => a.services ?? []);
+            }
+            if (lastVisitServices.length > 0) {
+              setSelectedServices(lastVisitServices.map(s => ({
+                serviceId: s.serviceId,
+                name: s.name,
+                price: s.price,
+                durationMinutes: s.durationMinutes,
+                color: s.color,
+                materialCostPercent: s.materialCostPercent ?? 0,
+              })));
+            }
           }
         }
       } else {
@@ -215,6 +230,7 @@ export default function AppointmentModal({
       price: svc.price,
       durationMinutes: svc.durationMinutes,
       color: svc.color,
+      materialCostPercent: svc.materialCostPercent ?? 0,
     }]);
   };
 
@@ -243,6 +259,7 @@ export default function AppointmentModal({
         price: s.price,
         durationMinutes: s.durationMinutes,
         color: s.color,
+        materialCostPercent: s.materialCostPercent ?? 0,
       })),
     };
   };
@@ -501,7 +518,13 @@ export default function AppointmentModal({
                             <button
                               type="button"
                               onClick={() => {
-                                setSelectedServices(ultima.services.map(s => ({
+                                // Reconstitui todos os serviços da última visita (incluindo grupo)
+                                const lastVisitSvcs = ultima.groupId
+                                  ? clientAppts.filter(a => a.groupId === ultima.groupId)
+                                      .sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime())
+                                      .flatMap(a => a.services ?? [])
+                                  : (ultima.services ?? []);
+                                setSelectedServices(lastVisitSvcs.map(s => ({
                                   serviceId: s.serviceId,
                                   name: s.name,
                                   price: s.price,
@@ -516,7 +539,12 @@ export default function AppointmentModal({
                               className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-md border border-primary/30 bg-primary/5 text-xs font-medium text-primary hover:bg-primary/10 transition-colors"
                             >
                               <RotateCcw className="w-3 h-3" />
-                              Repetir última visita ({ultima.services.map(s => s.name).join(", ")})
+                              Repetir última visita ({
+                                (ultima.groupId
+                                  ? clientAppts.filter(a => a.groupId === ultima.groupId).flatMap(a => a.services ?? [])
+                                  : (ultima.services ?? [])
+                                ).map(s => s.name).join(", ")
+                              })
                             </button>
                           )}
                         </div>
