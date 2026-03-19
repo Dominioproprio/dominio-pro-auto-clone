@@ -138,9 +138,10 @@ export default function CaixaPage() {
   }, [entries, currentSession, refreshKey]);
 
   // KPIs do caixa atual
-  const totalRevenue     = entries.reduce((s, e) => s + e.amount, 0);
-  const totalCommissions = entries.reduce((s, e) => s + e.commissionValue, 0);
-  const netRevenue       = totalRevenue - totalCommissions;
+  const totalRevenue       = entries.reduce((s, e) => s + e.amount, 0);
+  const totalMaterialCosts = entries.reduce((s, e) => s + (e.materialCostValue ?? 0), 0);
+  const totalCommissions   = entries.reduce((s, e) => s + e.commissionValue, 0);
+  const netRevenue         = totalRevenue - totalMaterialCosts - totalCommissions;
   const openingBal       = toNum(currentSession?.openingBalance);
 
   // Comissões agrupadas por funcionário
@@ -256,6 +257,7 @@ export default function CaixaPage() {
           paymentMethod:     entryForm.paymentMethod,
           commissionPercent: emp.commissionPercent,
           commissionValue,
+          materialCostValue: 0,
           isAutoLaunch:      false,
         });
         toast.success("Lançamento registrado!");
@@ -305,9 +307,12 @@ export default function CaixaPage() {
       for (const appt of selectedAppts) {
         const emp = employees.find(e => e.id === appt.employeeId);
         if (!emp) continue;
-        const amount          = toNum(appt.totalPrice);
-        const commissionValue = amount * (emp.commissionPercent / 100);
-        const services        = (appt.services ?? []).map(s => s.name).join(", ") || "Serviço";
+        const amount            = toNum(appt.totalPrice);
+        const materialCostValue = (appt.services ?? []).reduce((s, sv) =>
+          s + ((sv.price ?? 0) * (sv.materialCostPercent ?? 0) / 100), 0);
+        const baseForCommission = Math.max(0, amount - materialCostValue);
+        const commissionValue   = baseForCommission * (emp.commissionPercent / 100);
+        const services          = (appt.services ?? []).map(s => s.name).join(", ") || "Serviço";
 
         await cashEntriesStore.create({
           sessionId:         currentSession.id,
@@ -319,6 +324,7 @@ export default function CaixaPage() {
           paymentMethod:     autoPayMethod,
           commissionPercent: emp.commissionPercent,
           commissionValue,
+          materialCostValue,
           isAutoLaunch:      true,
         });
 
@@ -659,6 +665,12 @@ export default function CaixaPage() {
                         <span className="text-muted-foreground">Faturamento bruto</span>
                         <span className="font-semibold">R$ {totalRevenue.toFixed(2)}</span>
                       </div>
+                      {totalMaterialCosts > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Custo de material</span>
+                          <span className="font-semibold text-orange-400">- R$ {totalMaterialCosts.toFixed(2)}</span>
+                        </div>
+                      )}
                       <div className="flex justify-between">
                         <span className="text-muted-foreground">Total comissões</span>
                         <span className="font-semibold text-red-400">- R$ {totalCommissions.toFixed(2)}</span>
@@ -792,6 +804,12 @@ export default function CaixaPage() {
                 <p className="text-muted-foreground text-xs">Faturamento</p>
                 <p className="font-bold text-primary text-lg">R$ {totalRevenue.toFixed(2)}</p>
               </div>
+              {totalMaterialCosts > 0 && (
+                <div className="bg-orange-500/10 border border-orange-500/20 rounded-lg p-3">
+                  <p className="text-muted-foreground text-xs">Custo de material</p>
+                  <p className="font-bold text-orange-400 text-lg">- R$ {totalMaterialCosts.toFixed(2)}</p>
+                </div>
+              )}
               <div className="bg-secondary/50 rounded-lg p-3">
                 <p className="text-muted-foreground text-xs">Comissões</p>
                 <p className="font-bold text-lg">- R$ {totalCommissions.toFixed(2)}</p>
