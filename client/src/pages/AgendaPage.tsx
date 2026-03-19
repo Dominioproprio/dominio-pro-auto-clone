@@ -490,9 +490,7 @@ export default function AgendaPage() {
           return;
         }
 
-        // Desconta scroll da grade para posição precisa
-        const scrollTop = gridRef.current?.scrollTop ?? 0;
-        const y = e.clientY - rect.top + scrollTop;
+        const y = e.clientY - rect.top;
         // Calcula os minutos desde o início do dia baseado na posição Y
         const minutesFromStart = (y / HOUR_HEIGHT) * 60;
         // Arredonda para o snap mais próximo
