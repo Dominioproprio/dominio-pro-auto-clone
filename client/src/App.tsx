@@ -21,6 +21,8 @@ import FerramentasClientesPage from "./pages/FerramentasClientesPage";
 import { useState, useEffect, useCallback } from "react";
 import { toast } from "sonner";
 import { fetchAllData, autoOpenCashIfNeeded } from "./lib/store";
+import { getSession, clearSession, canAccess, getDefaultRoute, isAccessControlEnabled } from "./lib/access";
+import ProfileSelector from "./components/ProfileSelector";
 
 function getAccent() {
   try {
@@ -35,7 +37,23 @@ function AppContent() {
   const [error, setError]         = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [, setLocation]           = useLocation();
+  const [location]                = useLocation();
   const accent = getAccent();
+
+  // ── Controle de acesso ───────────────────────────────
+  const session = getSession();
+  const accessEnabled = isAccessControlEnabled();
+
+  // Se controle ativado e sem sessão → mostrar seletor
+  if (!loading && accessEnabled && !session) {
+    return <ProfileSelector />;
+  }
+
+  // Se tem sessão mas tenta acessar rota bloqueada → redirecionar
+  if (session && accessEnabled && !canAccess(session.role, location)) {
+    setLocation(getDefaultRoute(session.role));
+    return null;
+  }
 
   useEffect(() => {
     fetchAllData()
