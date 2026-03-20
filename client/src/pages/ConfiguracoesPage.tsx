@@ -4,6 +4,7 @@
 import { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import { THEME_PALETTES } from "@/components/DominioLayout";
+import { loadAccessConfig, saveAccessConfig, type AccessConfig, DEFAULT_ACCESS_CONFIG } from "@/lib/access";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,7 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
-import { Settings, Building2, Clock, Bell, Palette, Save, ImagePlus, Trash2, Scissors, Monitor, Zap } from "lucide-react";
+import { Settings, Building2, Clock, Bell, Palette, Save, ImagePlus, Trash2, Scissors, Monitor, Zap, Shield, Eye, EyeOff } from "lucide-react";
 import { applyAccentColor } from "@/contexts/ThemeContext";
 
 type BgType = "default" | "solid" | "gradient" | "image";
@@ -76,6 +77,19 @@ export default function ConfiguracoesPage() {
   const [loading, setLoading] = useState(false);
   const logoInputRef  = useRef<HTMLInputElement>(null);
   const bgImgInputRef = useRef<HTMLInputElement>(null);
+  const [access, setAccess] = useState<AccessConfig>(() => loadAccessConfig());
+  const [showPwd, setShowPwd] = useState<Record<string, boolean>>({});
+
+  const updateAccess = (key: keyof AccessConfig, value: any) => {
+    setAccess(prev => {
+      const next = { ...prev, [key]: value };
+      saveAccessConfig(next);
+      return next;
+    });
+  };
+
+  const toggleShowPwd = (key: string) =>
+    setShowPwd(prev => ({ ...prev, [key]: !prev[key] }));
 
   useEffect(() => {
     try {
@@ -454,6 +468,101 @@ export default function ConfiguracoesPage() {
               </div>
             )}
           </div>
+        </CardContent>
+      </Card>
+
+      {/* Controle de Acesso */}
+      <Card className="border-border bg-card/50">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Shield className="w-4 h-4 text-primary" />Controle de Acesso
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <p className="text-xs text-muted-foreground">
+            Defina uma senha de dono para ativar o controle de acesso. Funcionários verão apenas Agenda, Clientes e Serviços.
+          </p>
+
+          {/* Senha do dono */}
+          <div className="space-y-2">
+            <Label className="flex items-center gap-1.5">👑 Senha do Dono {access.ownerPassword.length >= 4 && <span className="text-[10px] text-emerald-400 font-normal">(ativo)</span>}</Label>
+            <div className="relative">
+              <Input
+                type={showPwd["owner"] ? "text" : "password"}
+                placeholder="Mín. 4 caracteres para ativar"
+                value={access.ownerPassword}
+                onChange={e => updateAccess("ownerPassword", e.target.value)}
+                className="pr-10"
+              />
+              <button type="button" onClick={() => toggleShowPwd("owner")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+                {showPwd["owner"] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+
+          <Separator />
+
+          {/* Gerente */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label className="flex items-center gap-1.5">👔 Perfil Gerente</Label>
+              <Switch checked={access.managerEnabled} onCheckedChange={v => updateAccess("managerEnabled", v)} />
+            </div>
+            {access.managerEnabled && (
+              <div className="space-y-2 pl-2">
+                <Input placeholder="Nome do gerente" value={access.managerName}
+                  onChange={e => updateAccess("managerName", e.target.value)} />
+                <div className="relative">
+                  <Input
+                    type={showPwd["manager"] ? "text" : "password"}
+                    placeholder="Senha do gerente"
+                    value={access.managerPassword}
+                    onChange={e => updateAccess("managerPassword", e.target.value)}
+                    className="pr-10"
+                  />
+                  <button type="button" onClick={() => toggleShowPwd("manager")}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+                    {showPwd["manager"] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <Separator />
+
+          {/* Funcionários */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label className="flex items-center gap-1.5">✂️ Perfil Funcionário</Label>
+              <Switch checked={access.employeesAccessEnabled} onCheckedChange={v => updateAccess("employeesAccessEnabled", v)} />
+            </div>
+            {access.employeesAccessEnabled && (
+              <div className="space-y-2 pl-2">
+                <p className="text-[11px] text-muted-foreground">Senha única para todos os funcionários. Acesso: Agenda, Clientes, Serviços, Histórico e Aparência.</p>
+                <div className="relative">
+                  <Input
+                    type={showPwd["employee"] ? "text" : "password"}
+                    placeholder="Senha dos funcionários"
+                    value={access.employeePassword}
+                    onChange={e => updateAccess("employeePassword", e.target.value)}
+                    className="pr-10"
+                  />
+                  <button type="button" onClick={() => toggleShowPwd("employee")}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+                    {showPwd["employee"] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {access.ownerPassword.length >= 4 && (
+            <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-400">
+              ✓ Controle de acesso ativo. Na próxima abertura do app será solicitada a senha.
+            </div>
+          )}
         </CardContent>
       </Card>
 
