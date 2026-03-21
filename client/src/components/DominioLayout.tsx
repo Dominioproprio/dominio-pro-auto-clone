@@ -538,10 +538,10 @@ export default function DominioLayout({ children, onNewAppt }: {
               return (
                 <button key={path} onClick={() => navigate(path)}
                   className="flex flex-col items-center gap-1 px-4 py-1.5 rounded-xl transition-all duration-200 min-w-0"
-                  style={{ color: active ? accent : palette.textMuted }}
                   style={active ? {
                     background: `${accent}18`,
-                  } : {}}>
+                    color: accent,
+                  } : { color: palette.textMuted }}>
                   <div className="relative">
                     <Icon className="w-5 h-5 transition-all"
                       style={{ color: active ? accent : "rgba(255,255,255,0.35)" }} />
