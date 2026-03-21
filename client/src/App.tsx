@@ -35,14 +35,27 @@ function getAccent() {
 function AppContent() {
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState<string | null>(null);
-  const [modalOpen, setModalOpen] = useState(false);
   const [, setLocation]           = useLocation();
   const [location]                = useLocation();
   const accent = getAccent();
 
   // ── Controle de acesso ───────────────────────────────
-  const session = getSession();
-  const accessEnabled = isAccessControlEnabled();
+  const [accessEnabled, setAccessEnabled] = useState(isAccessControlEnabled);
+  const [session, setSession] = useState(getSession);
+
+  // Revalida acesso quando salon_config muda (ex: senha configurada)
+  useEffect(() => {
+    const onUpdate = () => {
+      setAccessEnabled(isAccessControlEnabled());
+      setSession(getSession());
+    };
+    window.addEventListener("salon_config_updated", onUpdate);
+    window.addEventListener("storage", onUpdate);
+    return () => {
+      window.removeEventListener("salon_config_updated", onUpdate);
+      window.removeEventListener("storage", onUpdate);
+    };
+  }, []);
 
   // Se controle ativado e sem sessão → mostrar seletor
   if (!loading && accessEnabled && !session) {
