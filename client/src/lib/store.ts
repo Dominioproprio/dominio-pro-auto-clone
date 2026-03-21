@@ -351,6 +351,16 @@ export const appointmentsStore = {
     const appt = toAppointment(row);
     cache.appointments.push(appt);
     await addAuditLog("appointment", appt.id, "create", `Agendamento para "${appt.clientName}" criado`);
+
+    // AUTO-LAUNCH: Se criado já como completed, lança no caixa imediatamente
+    if (appt.status === "completed" && toNum(appt.totalPrice) > 0) {
+      try {
+        await autoLaunchCashEntry(appt);
+      } catch (e) {
+        console.error("Erro ao criar lançamento automático no create:", e);
+      }
+    }
+
     return appt;
   },
   async update(id: number, data: Partial<Appointment>): Promise<Appointment | null> {
@@ -593,74 +603,6 @@ export async function autoOpenCashIfNeeded(): Promise<boolean> {
 
   await cashSessionsStore.open(openingBalance);
   return true;
-}
-
-// ─── Fechamento automático à meia-noite ──────────────────
-
-/**
- * Lança todos os agendamentos concluídos pendentes e fecha o caixa aberto.
- * Chamado automaticamente às 00:00 pelo scheduler em main.tsx.
- */
-export async function autoCloseCashAtMidnight(): Promise<void> {
-  const session = cashSessionsStore.getCurrent();
-  if (!session) return; // Nenhum caixa aberto, nada a fazer
-
-  try {
-    // Lança automaticamente todos os agendamentos concluídos pendentes da sessão
-    const sessionStart = session.openedAt.slice(0, 10);
-    const allAppts = appointmentsStore.list({ startDate: sessionStart });
-    const launchedIds = new Set(
-      cashEntriesStore.list(session.id)
-        .filter(e => e.appointmentId)
-        .map(e => e.appointmentId!)
-    );
-    const pending = allAppts.filter(a =>
-      a.status === "completed" &&
-      !launchedIds.has(a.id) &&
-      (a.totalPrice ?? 0) > 0
-    );
-    for (const appt of pending) {
-      const emp = cache.employees.find(e => e.id === appt.employeeId);
-      if (!emp) continue;
-      const amount = Number(appt.totalPrice ?? 0);
-      const materialCostValue = (appt.services ?? []).reduce((sum, s) => {
-        return sum + ((s.price ?? 0) * (s.materialCostPercent ?? 0) / 100);
-      }, 0);
-      const baseForCommission = Math.max(0, amount - materialCostValue);
-      const commissionValue = baseForCommission * (emp.commissionPercent / 100);
-      const services = (appt.services ?? []).map(s => s.name).join(", ") || "Serviço";
-      await cashEntriesStore.create({
-        sessionId:         session.id,
-        appointmentId:     appt.id,
-        clientName:        appt.clientName ?? "Cliente",
-        employeeId:        emp.id,
-        description:       services,
-        amount,
-        paymentMethod:     "dinheiro",
-        commissionPercent: emp.commissionPercent,
-        commissionValue,
-        materialCostValue,
-        isAutoLaunch:      true,
-      });
-    }
-
-    // Recalcula totais com todos os lançamentos (incluindo os recém-criados)
-    const entries = cashEntriesStore.list(session.id);
-    const totalRevenue      = entries.reduce((s, e) => s + e.amount, 0);
-    const totalCommissions  = entries.reduce((s, e) => s + e.commissionValue, 0);
-    const totalMaterialCosts = entries.reduce((s, e) => s + e.materialCostValue, 0);
-
-    await cashSessionsStore.close(session.id, {
-      totalRevenue,
-      totalCommissions,
-      closingNotes: `Fechamento automático à meia-noite (${pending.length} lançamento(s) pendente(s) incluído(s))`,
-    });
-
-    window.dispatchEvent(new Event("cash_session_auto_closed"));
-    console.info(`[Caixa] Fechamento automático: R$ ${totalRevenue.toFixed(2)} — ${entries.length} lançamento(s)`);
-  } catch (e) {
-    console.error("[Caixa] Erro no fechamento automático:", e);
-  }
 }
 
 // ─── Carregamento inicial ─────────────────────────────────
