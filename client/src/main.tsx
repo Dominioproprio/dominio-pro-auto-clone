@@ -2,7 +2,6 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import "./index.css";
 import { supabase } from "./lib/supabase";
-import { autoCloseCashAtMidnight } from "./lib/store";
 
 async function bootstrap() {
   // Garante sessão autenticada antes de renderizar
@@ -15,34 +14,13 @@ async function bootstrap() {
 
 bootstrap();
 
-// ── Fechamento automático do caixa à meia-noite ──────────
-function scheduleMidnightClose() {
-  const now  = new Date();
-  const next = new Date(now);
-  next.setDate(now.getDate() + 1);
-  next.setHours(0, 0, 10, 0); // 00:00:10 do dia seguinte (10s de margem)
-  const msUntilMidnight = next.getTime() - now.getTime();
-
-  setTimeout(async () => {
-    await autoCloseCashAtMidnight();
-    scheduleMidnightClose(); // reagenda para meia-noite seguinte
-  }, msUntilMidnight);
-
-  const h = Math.floor(msUntilMidnight / 3_600_000);
-  const m = Math.floor((msUntilMidnight % 3_600_000) / 60_000);
-  console.info(`[Caixa] Fechamento automático agendado em ${h}h${m}m`);
-}
-
-scheduleMidnightClose();
-
 // ── Service Worker — detecta nova versão e recarrega automaticamente ──
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").then((registration) => {
 
-    // Verifica updates periodicamente (a cada 60s enquanto o app está aberto)
+    // Verifica updates a cada 60s enquanto o app está aberto
     setInterval(() => registration.update(), 60_000);
 
-    // Quando um novo SW está esperando, manda sinal para ativar imediatamente
     const awaitingWorker = registration.waiting;
     if (awaitingWorker) {
       awaitingWorker.postMessage("SKIP_WAITING");
@@ -51,9 +29,7 @@ if ("serviceWorker" in navigator) {
     registration.addEventListener("updatefound", () => {
       const newWorker = registration.installing;
       if (!newWorker) return;
-
       newWorker.addEventListener("statechange", () => {
-        // Novo SW instalado e aguardando — ativa e recarrega
         if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
           newWorker.postMessage("SKIP_WAITING");
         }
@@ -62,7 +38,7 @@ if ("serviceWorker" in navigator) {
 
   }).catch(console.error);
 
-  // Recarrega a página quando o SW novo assumir o controle
+  // Recarrega quando o SW novo assumir controle
   let refreshing = false;
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     if (!refreshing) {
