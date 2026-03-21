@@ -2,10 +2,7 @@
  * ProfileSelector — Tela de seleção de perfil e login
  */
 import { useState } from "react";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
 import { type UserRole, setSession, loadAccessConfig, getDefaultRoute } from "@/lib/access";
-import { useLocation } from "wouter";
 
 function getAccent() {
   try {
@@ -26,13 +23,11 @@ function getSalonName() {
 export default function ProfileSelector() {
   const accent = getAccent();
   const salonName = getSalonName();
-  const [, setLocation] = useLocation();
+  const cfg = loadAccessConfig();
 
   const [selected, setSelected] = useState<UserRole | null>(null);
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-
-  const cfg = loadAccessConfig();
 
   const profiles = [
     { role: "owner" as UserRole,    emoji: "👑", label: "Dono",       sublabel: "Acesso total",      enabled: true },
@@ -40,116 +35,117 @@ export default function ProfileSelector() {
     { role: "employee" as UserRole, emoji: "✂️", label: "Funcionário", sublabel: "Agenda e clientes", enabled: cfg.employeesAccessEnabled },
   ].filter(p => p.enabled);
 
-  const handleSelect = (role: UserRole) => {
-    setSelected(role);
-    setPassword("");
-    setError("");
-  };
-
-  const handleLogin = () => {
+  function handleLogin() {
     if (!selected || !password) return;
 
-    const freshCfg = loadAccessConfig();
+    const fresh = loadAccessConfig();
     let correct = "";
     let name = "";
 
-    if (selected === "owner") {
-      correct = freshCfg.ownerPassword;
-      name = "Dono";
-    } else if (selected === "manager") {
-      correct = freshCfg.managerPassword;
-      name = freshCfg.managerName || "Gerente";
-    } else {
-      correct = freshCfg.employeePassword;
-      name = "Funcionário";
-    }
+    if (selected === "owner")   { correct = fresh.ownerPassword;    name = "Dono"; }
+    if (selected === "manager") { correct = fresh.managerPassword;   name = fresh.managerName || "Gerente"; }
+    if (selected === "employee"){ correct = fresh.employeePassword;  name = "Funcionário"; }
 
     if (password === correct) {
       setSession(selected, name);
-      setLocation(getDefaultRoute(selected));
+      window.location.href = getDefaultRoute(selected);
     } else {
-      setError("Senha incorreta. Tente novamente.");
+      setError("Senha incorreta.");
       setPassword("");
     }
-  };
+  }
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-6"
-      style={{ background: "#0d0d14" }}>
+    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24, background: "#0d0d14" }}>
 
-      <div className="flex flex-col items-center mb-10">
-        <div className="w-16 h-16 rounded-2xl flex items-center justify-center mb-4"
-          style={{
-            background: `linear-gradient(135deg, ${accent}40, ${accent}15)`,
-            border: `1.5px solid ${accent}50`,
-            boxShadow: `0 4px 24px ${accent}30`,
-          }}>
-          <span style={{ fontSize: 28 }}>✂️</span>
-        </div>
-        <h1 className="text-xl font-bold tracking-widest uppercase text-white"
-          style={{ textShadow: `0 0 20px ${accent}80`, fontFamily: "'Space Grotesk', sans-serif" }}>
+      {/* Logo */}
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 40 }}>
+        <div style={{
+          width: 64, height: 64, borderRadius: 16,
+          background: `linear-gradient(135deg, ${accent}40, ${accent}15)`,
+          border: `1.5px solid ${accent}50`,
+          boxShadow: `0 4px 24px ${accent}30`,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          marginBottom: 16, fontSize: 28,
+        }}>✂️</div>
+        <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 18, letterSpacing: "0.15em", textTransform: "uppercase", color: "#fff", textShadow: `0 0 20px ${accent}80`, margin: 0 }}>
           {salonName}
         </h1>
-        <p className="text-xs text-white/30 tracking-widest mt-1">DOMÍNIO PRO</p>
+        <p style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", letterSpacing: "0.25em", marginTop: 4 }}>DOMÍNIO PRO</p>
       </div>
 
-      <div className="w-full max-w-sm space-y-6">
-        <div>
-          <p className="text-xs text-white/40 uppercase tracking-widest mb-3 text-center">
-            Selecione seu perfil
-          </p>
-          <div className={`grid gap-3 ${profiles.length === 1 ? "grid-cols-1" : profiles.length === 2 ? "grid-cols-2" : "grid-cols-3"}`}>
-            {profiles.map(p => (
-              <button
-                key={p.role}
-                type="button"
-                onClick={() => handleSelect(p.role)}
-                className="flex flex-col items-center gap-2 p-4 rounded-2xl border-2 transition-all"
-                style={{
-                  borderColor: selected === p.role ? accent : "rgba(255,255,255,0.1)",
-                  background: selected === p.role ? `${accent}18` : "rgba(255,255,255,0.04)",
-                  boxShadow: selected === p.role ? `0 0 20px ${accent}30` : "none",
-                }}
-              >
-                <div style={{ fontSize: 28 }}>{p.emoji}</div>
-                <div>
-                  <p className="text-sm font-bold text-white">{p.label}</p>
-                  <p className="text-[10px] text-white/40 mt-0.5">{p.sublabel}</p>
-                </div>
-              </button>
-            ))}
-          </div>
+      <div style={{ width: "100%", maxWidth: 360 }}>
+
+        {/* Perfis */}
+        <p style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", letterSpacing: "0.2em", textAlign: "center", marginBottom: 12 }}>
+          Selecione seu perfil
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${profiles.length}, 1fr)`, gap: 12, marginBottom: 24 }}>
+          {profiles.map(p => (
+            <button
+              key={p.role}
+              type="button"
+              onClick={() => { setSelected(p.role); setPassword(""); setError(""); }}
+              style={{
+                display: "flex", flexDirection: "column", alignItems: "center", gap: 8,
+                padding: "16px 8px", borderRadius: 16,
+                border: `2px solid ${selected === p.role ? accent : "rgba(255,255,255,0.1)"}`,
+                background: selected === p.role ? `${accent}18` : "rgba(255,255,255,0.04)",
+                boxShadow: selected === p.role ? `0 0 20px ${accent}30` : "none",
+                cursor: "pointer", transition: "all 0.15s",
+              }}
+            >
+              <span style={{ fontSize: 28 }}>{p.emoji}</span>
+              <div>
+                <p style={{ fontSize: 13, fontWeight: 700, color: "#fff", margin: 0 }}>{p.label}</p>
+                <p style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", marginTop: 2 }}>{p.sublabel}</p>
+              </div>
+            </button>
+          ))}
         </div>
 
+        {/* Senha */}
         {selected && (
-          <div className="space-y-3">
-            <p className="text-xs text-white/40 text-center">Digite a senha de acesso</p>
-            <Input
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <p style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", textAlign: "center", margin: 0 }}>
+              Digite a senha de acesso
+            </p>
+            <input
               type="password"
               placeholder="••••••••"
               value={password}
+              autoFocus
               onChange={e => { setPassword(e.target.value); setError(""); }}
               onKeyDown={e => { if (e.key === "Enter") handleLogin(); }}
-              autoFocus
-              className="text-center text-lg tracking-widest bg-white/5 border-white/10 text-white placeholder:text-white/20"
+              style={{
+                width: "100%", padding: "12px 16px", borderRadius: 12, fontSize: 18,
+                textAlign: "center", letterSpacing: "0.3em",
+                background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+                color: "#fff", outline: "none", boxSizing: "border-box",
+              }}
             />
             {error && (
-              <p className="text-xs text-red-400 text-center">{error}</p>
+              <p style={{ fontSize: 12, color: "#f87171", textAlign: "center", margin: 0 }}>{error}</p>
             )}
-            <Button
+            <button
               type="button"
               onClick={handleLogin}
               disabled={!password}
-              className="w-full font-semibold"
-              style={{ background: `linear-gradient(135deg, ${accent}, ${accent}cc)` }}
+              style={{
+                width: "100%", padding: "14px", borderRadius: 12, fontSize: 15, fontWeight: 700,
+                background: password ? `linear-gradient(135deg, ${accent}, ${accent}cc)` : "rgba(255,255,255,0.1)",
+                color: password ? "#fff" : "rgba(255,255,255,0.3)",
+                border: "none", cursor: password ? "pointer" : "not-allowed",
+                transition: "all 0.15s",
+              }}
             >
               Entrar
-            </Button>
+            </button>
           </div>
         )}
       </div>
 
-      <p className="text-[10px] text-white/15 mt-12">Domínio Pro v2.0</p>
+      <p style={{ fontSize: 10, color: "rgba(255,255,255,0.15)", marginTop: 48 }}>Domínio Pro v2.0</p>
     </div>
   );
 }
