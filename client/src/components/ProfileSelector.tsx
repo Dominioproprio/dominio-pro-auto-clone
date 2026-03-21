@@ -79,36 +79,30 @@ export default function ProfileSelector() {
 
   const handleLogin = () => {
     if (!selected) return;
-    setLoading(true);
     setError("");
 
-    setTimeout(() => {
-      const cfg = loadAccessConfig();
-      // Recarrega cfg sempre na hora do login para pegar valor mais recente
-      const freshCfg = loadAccessConfig();
-      let correctPassword = "";
-      let profileName = "";
+    const freshCfg = loadAccessConfig();
+    let correctPassword = "";
+    let profileName = "";
 
-      if (selected === "owner") {
-        correctPassword = freshCfg.ownerPassword;
-        profileName = "Dono";
-      } else if (selected === "manager") {
-        correctPassword = freshCfg.managerPassword;
-        profileName = freshCfg.managerName || "Gerente";
-      } else {
-        correctPassword = freshCfg.employeePassword;
-        profileName = "Funcionário";
-      }
+    if (selected === "owner") {
+      correctPassword = freshCfg.ownerPassword;
+      profileName = "Dono";
+    } else if (selected === "manager") {
+      correctPassword = freshCfg.managerPassword;
+      profileName = freshCfg.managerName || "Gerente";
+    } else {
+      correctPassword = freshCfg.employeePassword;
+      profileName = "Funcionário";
+    }
 
-      if (password === correctPassword) {
-        setSession(selected, profileName);
-        setLocation(getDefaultRoute(selected));
-      } else {
-        setError("Senha incorreta. Tente novamente.");
-        setPassword("");
-      }
-      setLoading(false);
-    }, 300);
+    if (password === correctPassword) {
+      setSession(selected, profileName);
+      setLocation(getDefaultRoute(selected));
+    } else {
+      setError("Senha incorreta. Tente novamente.");
+      setPassword("");
+    }
   };
 
   return (
