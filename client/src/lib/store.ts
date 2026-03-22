@@ -533,6 +533,11 @@ async function autoLaunchCashEntry(appt: Appointment): Promise<void> {
   const currentSession = cache.cashSessions.find(s => s.status === "open");
   if (!currentSession) return; // Sem caixa aberto, não lança automaticamente
 
+  // Só lança se o agendamento é do mesmo dia ou posterior à abertura do caixa
+  const sessionDate = currentSession.openedAt.slice(0, 10); // yyyy-MM-dd
+  const apptDate    = appt.startTime.slice(0, 10);
+  if (apptDate < sessionDate) return; // Agendamento é de dia anterior ao caixa atual
+
   // Verifica se já existe lançamento para este agendamento
   const existing = cache.cashEntries.find(e => e.appointmentId === appt.id);
   if (existing) return; // Já foi lançado
