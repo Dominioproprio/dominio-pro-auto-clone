@@ -126,7 +126,7 @@ export function calcRevenueByDay(appts: Appointment[], days: number = 7): { date
     }).filter(isValid);
     result.push({
       date:    key,
-      label:   format(d, "EEE dd/MM", { locale: { code: "pt-BR" } as any }).replace(/^\w/, c => c.toUpperCase()),
+      label:   format(d, "dd/MM"),
       revenue: dayAppts.reduce((s, a) => s + toNum(a.totalPrice), 0),
       count:   dayAppts.length,
     });
