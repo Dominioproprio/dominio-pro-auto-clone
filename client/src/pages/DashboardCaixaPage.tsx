@@ -297,7 +297,7 @@ export default function DashboardCaixaPage() {
         </CardHeader>
         <CardContent>
           <ResponsiveContainer width="100%" height={180}>
-            <BarChart data={byDay} barSize={16}>
+            <BarChart data={(byDay || []).filter(d => d !== undefined)} barSize={16}>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
               <XAxis dataKey="label" tick={tickStyle} interval="preserveStartEnd" />
               <YAxis tick={tickStyle} />
