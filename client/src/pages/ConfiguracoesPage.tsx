@@ -84,6 +84,8 @@ export default function ConfiguracoesPage() {
     setAccess(prev => {
       const next = { ...prev, [key]: value };
       saveAccessConfig(next);
+      // Notifica App.tsx que o controle de acesso foi atualizado
+      window.dispatchEvent(new Event("salon_config_updated"));
       return next;
     });
   };
