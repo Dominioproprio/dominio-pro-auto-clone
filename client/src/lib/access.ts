@@ -20,8 +20,6 @@ const ALLOWED_ROUTES: Record<UserRole, string[]> = {
     "/agenda",
     "/clientes",
     "/servicos",
-    "/historico",
-    "/configuracoes",
   ],
 };
 
@@ -61,9 +59,9 @@ export const MENU_VISIBILITY: Record<UserRole, Record<string, boolean>> = {
     servicos: true,
     caixa: false,
     relatorios: false,
-    historico: true,
+    historico: false,
     backup: false,
-    configuracoes: true, // só aparência
+    configuracoes: false,
     ferramentas: false,
   },
 };
