@@ -914,41 +914,92 @@ export const tools: AgentTool[] = [
     optionalParams: ["data", "hora", "funcionario", "servico", "observacoes"],
     confirmationRequired: false,
     execute: async (params) => {
-      // Resolver cliente
+      // ── 1. Validar cliente no banco ──
       const client = findClientByName(params.nome);
-      const clientName = client ? client.name : params.nome;
-      const clientId = client ? client.id : null;
+      if (!client) {
+        // Sugerir clientes similares
+        const allClients = clientsStore.list();
+        const norm = normalize(params.nome);
+        const similar = allClients
+          .filter(c => {
+            const cn = normalize(c.name);
+            const parts = norm.split(" ").filter(p => p.length > 1);
+            return parts.some(p => cn.includes(p));
+          })
+          .slice(0, 5);
 
-      // Resolver funcionário (se informado, senão pega o primeiro ativo)
+        if (similar.length > 0) {
+          const suggestions = similar.map((c, i) => `${i + 1}. **${c.name}**${c.phone ? ` (${c.phone})` : ""}`).join("\n");
+          return {
+            success: false,
+            message: `Nao encontrei o cliente "${params.nome}" cadastrado.\n\nVoce quis dizer:\n${suggestions}\n\nDigite o nome correto ou "cadastrar cliente ${params.nome}" para cadastrar.`,
+          };
+        }
+        return {
+          success: false,
+          message: `Cliente "${params.nome}" nao encontrado no sistema.\n\nDigite "cadastrar cliente ${params.nome}" para cadastrar, ou "buscar cliente" para procurar.`,
+        };
+      }
+
+      // ── 2. Validar/sugerir funcionário ──
+      const activeEmps = employeesStore.list(true);
+      if (activeEmps.length === 0) {
+        return { success: false, message: "Nao ha funcionarios ativos cadastrados. Cadastre um funcionario antes de agendar." };
+      }
+
       let employeeId: number;
+      let empName: string;
       if (params.funcionario) {
         const emp = findEmployeeByName(params.funcionario);
         if (!emp) {
-          return { success: false, message: `Nao encontrei o funcionario "${params.funcionario}". Verifique o nome.` };
+          const empList = activeEmps.map((e, i) => `${i + 1}. **${e.name}**${e.specialties ? ` (${e.specialties})` : ""}`).join("\n");
+          return {
+            success: false,
+            message: `Nao encontrei o profissional "${params.funcionario}".\n\n**Profissionais disponiveis:**\n${empList}\n\nInforme o nome do profissional.`,
+          };
         }
         employeeId = emp.id;
-      } else {
-        const activeEmps = employeesStore.list(true);
-        if (activeEmps.length === 0) {
-          return { success: false, message: "Nao ha funcionarios cadastrados. Cadastre um funcionario antes de agendar." };
-        }
+        empName = emp.name;
+      } else if (activeEmps.length === 1) {
         employeeId = activeEmps[0].id;
+        empName = activeEmps[0].name;
+      } else {
+        // Múltiplos funcionários — sugerir e usar o primeiro como padrão
+        const empList = activeEmps.map((e, i) => `${i + 1}. **${e.name}**${e.specialties ? ` (${e.specialties})` : ""}`).join("\n");
+        employeeId = activeEmps[0].id;
+        empName = activeEmps[0].name;
+        // Nota: vamos usar o primeiro mas avisar na mensagem final
       }
 
-      // Resolver serviços (se informado)
+      // ── 3. Validar/sugerir serviço ──
+      const allServices = servicesStore.list(true);
       let services: { serviceId: number; name: string; price: number; durationMinutes: number; color: string; materialCostPercent: number }[] = [];
       let totalDuration = 60;
       let totalPrice = 0;
+      let servicoInfo = "";
+
       if (params.servico) {
         const svc = findServiceByName(params.servico);
-        if (svc) {
-          services = [{ serviceId: svc.id, name: svc.name, price: svc.price, durationMinutes: svc.durationMinutes, color: svc.color, materialCostPercent: svc.materialCostPercent }];
-          totalDuration = svc.durationMinutes;
-          totalPrice = svc.price;
+        if (!svc) {
+          if (allServices.length > 0) {
+            const svcList = allServices.map((s, i) => `${i + 1}. **${s.name}** — ${formatCurrency(s.price)} (${s.durationMinutes}min)`).join("\n");
+            return {
+              success: false,
+              message: `Nao encontrei o servico "${params.servico}".\n\n**Servicos disponiveis:**\n${svcList}\n\nInforme o nome do servico.`,
+            };
+          }
+          return { success: false, message: `Servico "${params.servico}" nao encontrado. Cadastre servicos primeiro.` };
         }
+        services = [{ serviceId: svc.id, name: svc.name, price: svc.price, durationMinutes: svc.durationMinutes, color: svc.color, materialCostPercent: svc.materialCostPercent }];
+        totalDuration = svc.durationMinutes;
+        totalPrice = svc.price;
+        servicoInfo = svc.name;
+      } else if (allServices.length > 0) {
+        // Sem servico informado — avisar que pode adicionar
+        servicoInfo = "(nenhum especificado)";
       }
 
-      // Resolver data
+      // ── 4. Resolver data ──
       let dateStr: string;
       const today = new Date();
       if (params.data) {
@@ -957,28 +1008,52 @@ export const tools: AgentTool[] = [
         dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
       }
 
-      // Resolver hora
+      // ── 5. Resolver hora ──
       let hour = 10;
       let minute = 0;
       if (params.hora) {
         const timeParts = params.hora.split(":");
         hour = parseInt(timeParts[0], 10);
         minute = parseInt(timeParts[1] ?? "0", 10);
+      } else {
+        // Sem hora — avisar na resposta
       }
 
-      // Validar hora no passado
-      const startDate = new Date(`${dateStr}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`);
-      if (startDate < new Date()) {
-        // Se a hora já passou mas é hoje, avisa mas cria mesmo assim
-      }
-
+      // ── 6. Verificar conflitos de horário ──
       const startTime = `${dateStr}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
+      const startDate = new Date(startTime);
       const endDate = new Date(startDate.getTime() + totalDuration * 60 * 1000);
       const endTime = `${dateStr}T${String(endDate.getHours()).padStart(2, "0")}:${String(endDate.getMinutes()).padStart(2, "0")}:00`;
 
+      // Checar se tem conflito no mesmo horário com mesmo funcionário
+      const dayAppts = appointmentsStore.list({ date: dateStr });
+      const conflicts = dayAppts.filter(a =>
+        a.status !== "cancelled" &&
+        a.employeeId === employeeId &&
+        a.startTime < endTime &&
+        a.endTime > startTime
+      );
+
+      if (conflicts.length > 0) {
+        const conflictInfo = conflicts.map(a => {
+          const h = a.startTime.split("T")[1]?.slice(0, 5) ?? "";
+          return `- ${h} — ${a.clientName ?? "Sem nome"}`;
+        }).join("\n");
+
+        // Sugerir próximo horário livre
+        const lastConflictEnd = conflicts.reduce((max, a) => a.endTime > max ? a.endTime : max, "");
+        const nextFree = lastConflictEnd.split("T")[1]?.slice(0, 5) ?? "";
+
+        return {
+          success: false,
+          message: `**${empName}** ja tem agendamento nesse horario:\n${conflictInfo}\n\nProximo horario livre: **${nextFree}**\nDeseja agendar nesse horario? Diga "agendar ${client.name} as ${nextFree}"`,
+        };
+      }
+
+      // ── 7. Criar agendamento ──
       const appt = await appointmentsStore.create({
-        clientName: clientName,
-        clientId: clientId,
+        clientName: client.name,
+        clientId: client.id,
         employeeId,
         startTime,
         endTime,
@@ -990,15 +1065,38 @@ export const tools: AgentTool[] = [
         services,
       });
 
-      const empName = employeesStore.list(false).find(e => e.id === employeeId)?.name ?? "";
+      // ── 8. Montar mensagem de sucesso com detalhes ──
       const horaStr = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+      const dataFormatada = dateStr.split("-").reverse().join("/");
+
       let msg = `Agendamento criado com sucesso!\n\n`;
-      msg += `- **Cliente:** ${clientName}\n`;
-      msg += `- **Data:** ${dateStr.split("-").reverse().join("/")}\n`;
-      msg += `- **Horario:** ${horaStr}\n`;
-      if (empName) msg += `- **Profissional:** ${empName}\n`;
-      if (services.length > 0) msg += `- **Servico:** ${services.map(s => s.name).join(", ")}\n`;
-      if (totalPrice > 0) msg += `- **Valor:** ${formatCurrency(totalPrice)}\n`;
+      msg += `- **Cliente:** ${client.name}${client.phone ? ` (${client.phone})` : ""}\n`;
+      msg += `- **Data:** ${dataFormatada}\n`;
+      msg += `- **Horario:** ${horaStr} - ${endTime.split("T")[1]?.slice(0, 5) ?? ""}\n`;
+      msg += `- **Profissional:** ${empName}\n`;
+
+      if (services.length > 0) {
+        msg += `- **Servico:** ${services.map(s => s.name).join(", ")}\n`;
+        msg += `- **Valor:** ${formatCurrency(totalPrice)}\n`;
+        msg += `- **Duracao:** ${totalDuration}min\n`;
+      }
+
+      // Sugestões contextuais
+      const hints: string[] = [];
+      if (!params.servico && allServices.length > 0) {
+        const topSvcs = allServices.slice(0, 3).map(s => s.name).join(", ");
+        hints.push(`Servicos disponiveis: ${topSvcs}. Diga "agendar ${client.name} com [servico]" para incluir.`);
+      }
+      if (!params.funcionario && activeEmps.length > 1) {
+        hints.push(`Agendado com **${empName}**. Outros profissionais: ${activeEmps.filter(e => e.id !== employeeId).map(e => e.name).join(", ")}.`);
+      }
+      if (!params.hora) {
+        hints.push(`Horario padrao 10:00. Diga a hora desejada na proxima vez.`);
+      }
+
+      if (hints.length > 0) {
+        msg += `\n**Dicas:**\n${hints.map(h => `- ${h}`).join("\n")}`;
+      }
 
       return {
         success: true,
@@ -1020,17 +1118,49 @@ export const tools: AgentTool[] = [
     execute: async (params) => {
       const today = new Date();
       const dateStr = params.data ?? `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+      const dataFormatada = dateStr.split("-").reverse().join("/");
+
+      // Validar cliente no banco
+      const client = findClientByName(params.nome);
+      const norm = normalize(params.nome);
 
       const allAppts = appointmentsStore.list({ date: dateStr });
-      const norm = normalize(params.nome);
       const matching = allAppts.filter(a =>
         a.status !== "cancelled" &&
         a.clientName &&
-        normalize(a.clientName).includes(norm)
+        (client ? a.clientId === client.id || normalize(a.clientName).includes(normalize(client.name)) : normalize(a.clientName).includes(norm))
       );
 
       if (matching.length === 0) {
-        return { success: false, message: `Nao encontrei agendamentos para "${params.nome}" em ${dateStr.split("-").reverse().join("/")}.` };
+        // Mostrar agendamentos do dia para ajudar
+        const active = allAppts.filter(a => a.status !== "cancelled");
+        if (active.length > 0) {
+          const emps = employeesStore.list(false);
+          const listStr = active.map(a => {
+            const h = a.startTime.split("T")[1]?.slice(0, 5) ?? "";
+            const emp = emps.find(e => e.id === a.employeeId);
+            return `- **${h}** — ${a.clientName ?? "Sem nome"}${emp ? ` c/ ${emp.name}` : ""}`;
+          }).join("\n");
+          return {
+            success: false,
+            message: `Nao encontrei agendamentos de "${params.nome}" em ${dataFormatada}.\n\n**Agendamentos do dia:**\n${listStr}\n\nDiga "cancelar agendamento de [nome]" com o nome correto.`,
+          };
+        }
+        return { success: false, message: `Nao encontrei agendamentos para "${params.nome}" em ${dataFormatada}. Nenhum agendamento nesta data.` };
+      }
+
+      // Se múltiplos agendamentos, listar para o usuário escolher
+      if (matching.length > 1 && !params.hora) {
+        const emps = employeesStore.list(false);
+        const listStr = matching.map((a, i) => {
+          const h = a.startTime.split("T")[1]?.slice(0, 5) ?? "";
+          const emp = emps.find(e => e.id === a.employeeId);
+          return `${i + 1}. **${h}** — ${a.clientName}${emp ? ` c/ ${emp.name}` : ""}`;
+        }).join("\n");
+        return {
+          success: false,
+          message: `Encontrei ${matching.length} agendamentos de "${client?.name ?? params.nome}" em ${dataFormatada}:\n\n${listStr}\n\nInforme o horario para cancelar: "cancelar agendamento de ${client?.name ?? params.nome} as [hora]"`,
+        };
       }
 
       // Se tem hora específica, filtra
@@ -1038,17 +1168,18 @@ export const tools: AgentTool[] = [
         const withHour = matching.filter(a => a.startTime.includes(`T${params.hora}`));
         if (withHour.length === 1) {
           await appointmentsStore.update(withHour[0].id, { status: "cancelled" });
-          return { success: true, message: `Agendamento de "${withHour[0].clientName}" as ${params.hora} cancelado.` };
+          return { success: true, message: `Agendamento de **${withHour[0].clientName}** as ${params.hora} em ${dataFormatada} cancelado com sucesso.`, navigateTo: "/agenda" };
         }
       }
 
-      // Cancela o primeiro encontrado
+      // Cancela o encontrado
       const appt = matching[0];
       await appointmentsStore.update(appt.id, { status: "cancelled" });
       const hora = appt.startTime.split("T")[1]?.slice(0, 5) ?? "";
+      const empName = employeesStore.list(false).find(e => e.id === appt.employeeId)?.name ?? "";
       return {
         success: true,
-        message: `Agendamento de "${appt.clientName}" as ${hora} cancelado com sucesso.`,
+        message: `Agendamento cancelado:\n\n- **Cliente:** ${appt.clientName}\n- **Data:** ${dataFormatada}\n- **Horario:** ${hora}\n${empName ? `- **Profissional:** ${empName}\n` : ""}`,
         navigateTo: "/agenda",
       };
     },
@@ -1066,27 +1197,49 @@ export const tools: AgentTool[] = [
       const today = new Date();
       const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
+      // Validar cliente
+      const client = findClientByName(params.nome);
+      const norm = normalize(params.nome);
+
       // Buscar agendamentos do cliente (hoje ou futuro)
       const allAppts = appointmentsStore.list({ startDate: todayStr });
-      const norm = normalize(params.nome);
       const matching = allAppts.filter(a =>
         a.status !== "cancelled" &&
         a.clientName &&
-        normalize(a.clientName).includes(norm)
+        (client ? a.clientId === client.id || normalize(a.clientName).includes(normalize(client.name)) : normalize(a.clientName).includes(norm))
       );
 
       if (matching.length === 0) {
+        // Sugerir agendamentos futuros disponíveis
+        const futureActive = allAppts.filter(a => a.status !== "cancelled").slice(0, 5);
+        if (futureActive.length > 0) {
+          const emps = employeesStore.list(false);
+          const listStr = futureActive.map(a => {
+            const d = a.startTime.split("T")[0].split("-").reverse().join("/");
+            const h = a.startTime.split("T")[1]?.slice(0, 5) ?? "";
+            const emp = emps.find(e => e.id === a.employeeId);
+            return `- **${d} ${h}** — ${a.clientName ?? "Sem nome"}${emp ? ` c/ ${emp.name}` : ""}`;
+          }).join("\n");
+          return {
+            success: false,
+            message: `Nao encontrei agendamentos ativos para "${params.nome}".\n\n**Proximos agendamentos:**\n${listStr}`,
+          };
+        }
         return { success: false, message: `Nao encontrei agendamentos ativos para "${params.nome}".` };
       }
 
+      // Se múltiplos, avisar qual será movido
       const appt = matching[0];
+      const originalHora = appt.startTime.split("T")[1]?.slice(0, 5) ?? "";
+      const originalData = appt.startTime.split("T")[0].split("-").reverse().join("/");
+
       const updates: Partial<{ employeeId: number; startTime: string; endTime: string }> = {};
 
       if (params.data || params.hora) {
         const originalStart = new Date(appt.startTime);
         const duration = new Date(appt.endTime).getTime() - originalStart.getTime();
 
-        let newDate = params.data ?? todayStr;
+        const newDate = params.data ?? todayStr;
         let newHour = originalStart.getHours();
         let newMin = originalStart.getMinutes();
         if (params.hora) {
@@ -1099,20 +1252,61 @@ export const tools: AgentTool[] = [
         const newEndDate = new Date(new Date(newStart).getTime() + duration);
         const newEnd = `${newDate}T${String(newEndDate.getHours()).padStart(2, "0")}:${String(newEndDate.getMinutes()).padStart(2, "0")}:00`;
 
+        // Verificar conflito no novo horário
+        const targetEmpId = params.funcionario ? (findEmployeeByName(params.funcionario)?.id ?? appt.employeeId) : appt.employeeId;
+        const dayAppts = appointmentsStore.list({ date: newDate });
+        const conflicts = dayAppts.filter(a =>
+          a.id !== appt.id &&
+          a.status !== "cancelled" &&
+          a.employeeId === targetEmpId &&
+          a.startTime < newEnd &&
+          a.endTime > newStart
+        );
+
+        if (conflicts.length > 0) {
+          const conflictInfo = conflicts.map(a => {
+            const h = a.startTime.split("T")[1]?.slice(0, 5) ?? "";
+            return `- ${h} — ${a.clientName ?? "Sem nome"}`;
+          }).join("\n");
+          return {
+            success: false,
+            message: `Conflito no novo horario!\n\nAgendamentos existentes:\n${conflictInfo}\n\nEscolha outro horario.`,
+          };
+        }
+
         updates.startTime = newStart;
         updates.endTime = newEnd;
       }
 
       if (params.funcionario) {
         const emp = findEmployeeByName(params.funcionario);
-        if (emp) updates.employeeId = emp.id;
+        if (!emp) {
+          const activeEmps = employeesStore.list(true);
+          const empList = activeEmps.map((e, i) => `${i + 1}. **${e.name}**`).join("\n");
+          return {
+            success: false,
+            message: `Profissional "${params.funcionario}" nao encontrado.\n\n**Disponiveis:**\n${empList}`,
+          };
+        }
+        updates.employeeId = emp.id;
       }
 
       await appointmentsStore.update(appt.id, updates);
-      const newHora = updates.startTime?.split("T")[1]?.slice(0, 5) ?? appt.startTime.split("T")[1]?.slice(0, 5);
+      const newHora = updates.startTime?.split("T")[1]?.slice(0, 5) ?? originalHora;
+      const newData = params.data ? params.data.split("-").reverse().join("/") : originalData;
+      const newEmpName = updates.employeeId
+        ? (employeesStore.list(false).find(e => e.id === updates.employeeId)?.name ?? "")
+        : (employeesStore.list(false).find(e => e.id === appt.employeeId)?.name ?? "");
+
+      let msg = `Agendamento reagendado com sucesso!\n\n`;
+      msg += `- **Cliente:** ${appt.clientName}\n`;
+      msg += `- **De:** ${originalData} as ${originalHora}\n`;
+      msg += `- **Para:** ${newData} as ${newHora}\n`;
+      if (newEmpName) msg += `- **Profissional:** ${newEmpName}\n`;
+
       return {
         success: true,
-        message: `Agendamento de "${appt.clientName}" reagendado para ${params.data ? params.data.split("-").reverse().join("/") + " " : ""}${newHora}.`,
+        message: msg,
         navigateTo: "/agenda",
       };
     },
@@ -1129,13 +1323,19 @@ export const tools: AgentTool[] = [
     execute: async (params) => {
       const today = new Date();
       const dateStr = params.data ?? `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+      const dataFormatada = dateStr.split("-").reverse().join("/");
 
       let appts = appointmentsStore.list({ date: dateStr });
 
       // Filtrar por cliente
       if (params.nome) {
-        const norm = normalize(params.nome);
-        appts = appts.filter(a => a.clientName && normalize(a.clientName).includes(norm));
+        const client = findClientByName(params.nome);
+        if (client) {
+          appts = appts.filter(a => a.clientId === client.id || (a.clientName && normalize(a.clientName).includes(normalize(client.name))));
+        } else {
+          const norm = normalize(params.nome);
+          appts = appts.filter(a => a.clientName && normalize(a.clientName).includes(norm));
+        }
       }
 
       // Filtrar por funcionário
@@ -1143,26 +1343,58 @@ export const tools: AgentTool[] = [
         const emp = findEmployeeByName(params.funcionario);
         if (emp) {
           appts = appts.filter(a => a.employeeId === emp.id);
+        } else {
+          const activeEmps = employeesStore.list(true);
+          const empList = activeEmps.map((e, i) => `${i + 1}. **${e.name}**`).join("\n");
+          return {
+            success: false,
+            message: `Profissional "${params.funcionario}" nao encontrado.\n\n**Profissionais:**\n${empList}`,
+          };
         }
       }
 
       const active = appts.filter(a => a.status !== "cancelled");
+      const cancelled = appts.filter(a => a.status === "cancelled");
 
-      if (active.length === 0) {
-        return { success: true, message: `Nenhum agendamento encontrado para ${dateStr.split("-").reverse().join("/")}.` };
+      if (active.length === 0 && cancelled.length === 0) {
+        // Sugerir agendar
+        const activeEmps = employeesStore.list(true);
+        const empNames = activeEmps.slice(0, 3).map(e => e.name).join(", ");
+        return {
+          success: true,
+          message: `Nenhum agendamento em ${dataFormatada}.\n\n${activeEmps.length > 0 ? `Profissionais disponiveis: ${empNames}.\n` : ""}Diga "agendar [cliente] para ${dataFormatada}" para marcar.`,
+        };
       }
 
       const emps = employeesStore.list(false);
-      const lines = active.map(a => {
-        const hora = a.startTime.split("T")[1]?.slice(0, 5) ?? "";
-        const emp = emps.find(e => e.id === a.employeeId);
-        const status = a.status === "completed" ? " (concluido)" : a.status === "confirmed" ? " (confirmado)" : a.status === "in_progress" ? " (em andamento)" : "";
-        return `- **${hora}** — ${a.clientName ?? "Sem nome"}${emp ? ` c/ ${emp.name}` : ""}${a.totalPrice ? ` — ${formatCurrency(a.totalPrice)}` : ""}${status}`;
-      });
+      const lines = active
+        .sort((a, b) => a.startTime.localeCompare(b.startTime))
+        .map(a => {
+          const horaInicio = a.startTime.split("T")[1]?.slice(0, 5) ?? "";
+          const horaFim = a.endTime.split("T")[1]?.slice(0, 5) ?? "";
+          const emp = emps.find(e => e.id === a.employeeId);
+          const statusMap: Record<string, string> = {
+            completed: " *(concluido)*",
+            confirmed: " *(confirmado)*",
+            in_progress: " *(em andamento)*",
+            scheduled: "",
+          };
+          const status = statusMap[a.status] ?? "";
+          const svcNames = a.services?.map(s => s.name).join(", ") ?? "";
+          return `- **${horaInicio}-${horaFim}** — ${a.clientName ?? "Sem nome"}${emp ? ` c/ ${emp.name}` : ""}${svcNames ? ` | ${svcNames}` : ""}${a.totalPrice ? ` | ${formatCurrency(a.totalPrice)}` : ""}${status}`;
+        });
+
+      // Resumo
+      const totalRevenue = active.reduce((sum, a) => sum + (a.totalPrice ?? 0), 0);
+      let msg = `**Agenda ${dataFormatada}** — ${active.length} agendamento(s)${cancelled.length > 0 ? `, ${cancelled.length} cancelado(s)` : ""}\n\n`;
+      msg += lines.join("\n");
+      if (totalRevenue > 0) {
+        msg += `\n\n**Total previsto:** ${formatCurrency(totalRevenue)}`;
+      }
 
       return {
         success: true,
-        message: `**Agendamentos ${dateStr.split("-").reverse().join("/")}** (${active.length}):\n\n${lines.join("\n")}`,
+        message: msg,
         navigateTo: "/agenda",
       };
     },
