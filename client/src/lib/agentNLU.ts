@@ -49,6 +49,7 @@ const ABBREVIATIONS: Record<string, string> = {
 
 const SYNONYMS: Record<string, string[]> = {
   "criar": ["cadastrar", "adicionar", "novo", "nova", "registrar", "add", "incluir", "inserir", "botar", "colocar", "por"],
+  "agendar": ["marcar", "reservar", "booking", "agendar", "schedule", "agende", "marca", "agendem", "marquem"],
   "editar": ["alterar", "mudar", "modificar", "atualizar", "trocar", "corrigir", "ajustar", "update"],
   "excluir": ["deletar", "remover", "apagar", "eliminar", "tirar", "excluir"],
   "buscar": ["procurar", "encontrar", "achar", "pesquisar", "search", "localizar", "onde"],
@@ -64,7 +65,7 @@ const SYNONYMS: Record<string, string[]> = {
   "funcionario": ["profissional", "barbeiro", "cabeleireiro", "cabeleireira", "manicure", "colaborador", "empregado", "atendente"],
   "servico": ["procedimento", "tratamento", "servico", "corte", "escova", "manicure", "pedicure", "tintura", "coloracao", "hidratacao", "alisamento", "progressiva"],
   "caixa": ["financeiro", "dinheiro", "grana", "caixa", "receita", "faturamento"],
-  "agenda": ["horario", "calendario", "schedule", "agenda", "agendamento"],
+  "agenda": ["horario", "calendario", "schedule", "agenda", "agendamento", "marcado", "compromisso"],
   "relatorio": ["resumo", "balanco", "fechamento", "resultado", "report", "analise", "estatistica"],
   "historico": ["passado", "anterior", "registro", "log", "historico"],
 };
@@ -269,6 +270,40 @@ const INTENT_PATTERNS: IntentPattern[] = [
     negativeKeywords: [],
   },
 
+  // ── Agendamentos ──
+  {
+    intent: "criar_agendamento",
+    toolId: "criar_agendamento",
+    keywords: ["agendar", "agende", "marcar", "marca", "criar", "cadastrar", "novo", "nova", "registrar", "reservar", "booking"],
+    requiredAny: ["agendamento", "horario", "agendar", "agende", "marcar", "marca"],
+    bonusKeywords: ["cliente", "hoje", "amanha", "hora", "horas", "tarde", "manha"],
+    negativeKeywords: ["cancelar", "excluir", "mover", "trocar", "listar", "ver", "mostrar"],
+  },
+  {
+    intent: "cancelar_agendamento",
+    toolId: "cancelar_agendamento",
+    keywords: ["cancelar", "desmarcar", "excluir", "remover", "apagar"],
+    requiredAny: ["agendamento", "horario", "agendar", "consulta"],
+    bonusKeywords: ["cliente", "hoje", "amanha"],
+    negativeKeywords: ["criar", "cadastrar", "novo", "mover", "reagendar", "listar"],
+  },
+  {
+    intent: "mover_agendamento",
+    toolId: "mover_agendamento",
+    keywords: ["mover", "reagendar", "trocar", "transferir", "mudar", "alterar", "adiar", "antecipar"],
+    requiredAny: ["agendamento", "horario", "agendar", "consulta"],
+    bonusKeywords: ["cliente", "data", "hora", "para"],
+    negativeKeywords: ["criar", "cadastrar", "cancelar", "listar"],
+  },
+  {
+    intent: "listar_agendamentos",
+    toolId: "listar_agendamentos",
+    keywords: ["listar", "mostrar", "ver", "exibir", "quais", "quantos", "agenda"],
+    requiredAny: ["agendamento", "agendamentos", "agenda", "marcado", "marcados", "compromisso", "compromissos"],
+    bonusKeywords: ["hoje", "amanha", "dia", "semana"],
+    negativeKeywords: ["criar", "cadastrar", "cancelar", "mover"],
+  },
+
   // ── Navegação ──
   {
     intent: "navegar",
@@ -384,14 +419,18 @@ const PHONE_PATTERN = /(?:\(?\d{2}\)?\s*)?(?:9\s?)?\d{4}[-.\s]?\d{4}/;
 const EMAIL_PATTERN = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 const CPF_PATTERN = /\d{3}\.?\d{3}\.?\d{3}-?\d{2}/;
 const MONEY_PATTERN = /(?:R\$\s*)?(\d{1,}[.,]?\d{0,2})/;
-const TIME_PATTERN = /(?:(?:as?\s+)?(\d{1,2}):(\d{2})|(?:as?\s+)?(\d{1,2})\s*h\s*(\d{2})?|(?:as?\s+)?(\d{1,2})\s*horas?)/;
+const TIME_PATTERN = /(?:(?:as?\s+)?(\d{1,2}):(\d{2})|(?:as?\s+)?(\d{1,2})\s*h\s*(\d{2})?|(?:as?\s+)?(\d{1,2})\s*horas?(?:\s+da\s+(manha|tarde|noite))?)/;
 const DATE_PATTERN = /(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2,4}))?/;
 
 /** Extrai nome próprio de texto (heurística: palavra com inicial maiúscula) */
 function extractProperName(text: string, q: string): string | null {
   // Tenta extrair nome após preposições comuns
   const namePatterns = [
-    /(?:cliente|funcionario|profissional|barbeiro|cabeleireira?|manicure)\s+(?:chamad[ao]?\s+)?(.+?)(?:\s+(?:com|de|para|no|na|do|da|e\s|$))/i,
+    /(?:agendar?e?|marcar?|reservar)\s+(?:a\s+|o\s+)?(?:cliente\s+)?(.+?)(?:\s+(?:para|hoje|amanha|as\s|no\s|na\s|em\s|$))/i,
+    /(?:quero\s+)?(?:agendar?e?|marcar?)\s+(?:a\s+|o\s+)?(?:cliente\s+)?(.+?)(?:\s+(?:para|hoje|amanha|as\s|no\s|na\s|em\s|$))/i,
+    /(?:cancelar|desmarcar)\s+(?:o\s+|a\s+)?(?:agendamento\s+)?(?:do|da|de)\s+(.+?)(?:\s+(?:para|hoje|amanha|as\s|$))/i,
+    /(?:mover|reagendar|trocar)\s+(?:o\s+|a\s+)?(?:agendamento\s+)?(?:do|da|de)\s+(.+?)(?:\s+(?:para|$))/i,
+    /(?:cliente|funcionario|profissional|barbeiro|cabeleireira?|manicure)\s+(?:chamad[ao]?\s+)?(.+?)(?:\s+(?:com|de|para|no|na|do|da|e\s|hoje|amanha|as\s|$))/i,
     /(?:do|da|de)\s+(?:cliente|funcionario)\s+(.+?)(?:\s+(?:para|com|e\s|$))/i,
     /(?:cadastrar|criar|adicionar|novo|nova|registrar)\s+(?:o\s+|a\s+)?(?:cliente|funcionario|servico)\s+(.+?)(?:\s+(?:com|de|para|e\s|$))/i,
     /(?:editar|alterar|mudar|atualizar)\s+(?:o\s+|a\s+)?(?:cliente|funcionario|servico)\s+(.+?)(?:\s+(?:com|de|para|e\s|campo|$))/i,
@@ -457,8 +496,15 @@ export function extractEntities(text: string): ExtractedEntities {
   // Hora
   const timeMatch = q.match(TIME_PATTERN);
   if (timeMatch) {
-    const h = parseInt(timeMatch[1] ?? timeMatch[3] ?? timeMatch[5], 10);
+    let h = parseInt(timeMatch[1] ?? timeMatch[3] ?? timeMatch[5], 10);
     const m = parseInt(timeMatch[2] ?? timeMatch[4] ?? "0", 10);
+    // Ajustar "da tarde" / "da noite"
+    const period = timeMatch[6];
+    if (period === "tarde" && h < 12) h += 12;
+    if (period === "noite" && h < 12) h += 12;
+    if (period === "manha" && h === 12) h = 0;
+    // Se hora <= 6 e nao especificou manha, provavelmente e da tarde
+    if (!period && h >= 1 && h <= 6 && (q.includes("tarde") || q.includes("noite"))) h += 12;
     if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
       entities.hora = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
     }
@@ -471,6 +517,17 @@ export function extractEntities(text: string): ExtractedEntities {
     const month = dateMatch[2];
     const year = dateMatch[3] ?? new Date().getFullYear().toString();
     entities.data = `${year.length === 2 ? "20" + year : year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+
+  // "hoje" / "amanha" como data
+  if (q.includes("hoje") && !entities.data) {
+    const today = new Date();
+    entities.data = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  }
+  if ((q.includes("amanha") || q.includes("amanhã")) && !entities.data) {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    entities.data = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, "0")}-${String(tomorrow.getDate()).padStart(2, "0")}`;
   }
 
   // Período
@@ -567,7 +624,7 @@ export function detectPhraseType(text: string): PhraseType {
   if (q.endsWith("?") || /\?/.test(text)) return "question";
 
   // Comando (ação imperativa)
-  if (/^(criar|cadastrar|editar|alterar|excluir|remover|buscar|listar|abrir|fechar|registrar|lancar|ir|va|vai|mostra|ver|configur|exportar|navegar|adicionar|incluir)/.test(q)) return "command";
+  if (/^(criar|cadastrar|editar|alterar|excluir|remover|buscar|listar|abrir|fechar|registrar|lancar|ir|va|vai|mostra|ver|configur|exportar|navegar|adicionar|incluir|agendar|marcar|cancelar|mover|reagendar|quero)/.test(q)) return "command";
 
   return "unknown";
 }
