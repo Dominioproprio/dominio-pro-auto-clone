@@ -1,582 +1,904 @@
 /**
- * agentOrchestrator.ts — Orquestrador central do Super Agente.
- * Pipeline: normalizar → contexto → classificar → extrair → resolver tool →
- *           validar params → pedir confirmação → executar → formatar resposta.
+ * agentOrchestrator.ts — Orquestrador principal do agente.
+ * Conecta todos os módulos (Context, NLU, LLM, Actions) num fluxo unificado.
  *
- * Este módulo substitui o cascade de if/else do agentBrain.ts para ações/tools,
- * mantendo compatibilidade com as funcionalidades existentes (agenda actions,
- * scheduled commands, reports).
+ * Fluxo de processamento:
+ *   1. Recebe mensagem do usuário
+ *   2. Detecta follow-up e resolve referências pronominais (agentContext)
+ *   3. Tenta classificar com NLU local (regex — rápido, sem custo)
+ *   4. Se NLU local falhar ou confiança for baixa, usa LLM (GitHub Models)
+ *   5. Executa a ação correspondente (tools, agenda actions)
+ *   6. Gera resposta — NLU local para respostas simples, LLM para naturais
+ *   7. Atualiza contexto (turnos, entidades, tópico)
+ *
+ * O LLM é usado como FALLBACK inteligente, não como rota primária.
+ * Isso economiza chamadas à API e mantém o agente funcional offline.
+ *
+ * Uso:
+ *   import { handleUserMessage, initAgent } from "./agentOrchestrator";
+ *
+ *   initAgent({ githubToken: "ghp_xxx" });
+ *   const response = await handleUserMessage("Quais agendamentos de hoje?");
  */
-
-import {
-  normalizeText,
-  classifyIntent,
-  getBestIntent,
-  extractEntities,
-  detectPhraseType,
-  detectComposite,
-  type IntentScore,
-  type ExtractedEntities,
-  type PhraseType,
-} from "./agentNLU";
-
-import {
-  getToolById,
-  getAllTools,
-  type ToolResult,
-  type AgentTool,
-} from "./agentTools";
 
 import {
   addUserTurn,
   addAgentTurn,
-  getRecentTurns,
-  getLastEntities,
+  detectFollowUp,
+  resolveReferences,
   mergeEntities,
-  clearEntities,
-  setPendingQuestion,
+  getRelevantEntities,
+  getActiveTopic,
   getPendingQuestion,
   clearPendingQuestion,
-  setPendingConfirmation,
   getPendingConfirmation,
   clearPendingConfirmation,
+  getSlotFillingState,
+  fillSlot,
+  clearSlotFilling,
+  startSlotFilling,
+  recordAction,
+  getContextSummaryForPrompt,
+  setCurrentPage,
   hasRecentConversation,
-  getLastIntent,
-  userMentionedRecently,
+  resetConversation,
+  type ConversationTopic,
+  type SlotFillingState,
 } from "./agentContext";
+
+import {
+  configureLLM,
+  isLLMConfigured,
+  sendToLLM,
+  classifyIntent,
+  generateResponse,
+  testConnection,
+  type LLMResponse,
+  type IntentClassification,
+} from "./agentLLM";
 
 // ─── Tipos ─────────────────────────────────────────────────
 
-export interface OrchestratorResult {
-  message: string;
-  navigateTo?: string;
-  handled: boolean;
-  toolId?: string;
-  isAsync?: boolean;
+export interface AgentConfig {
+  /** GitHub PAT com scope models:read */
+  githubToken: string;
+  /** Modelo a usar (default: "openai/gpt-4o-mini") */
+  model?: string;
+  /** Contexto de negócio (nome do salão, serviços, etc.) */
+  businessContext?: string;
+  /** Se true, sempre usa LLM (mais natural, mais lento) */
+  alwaysUseLLM?: boolean;
+  /** Se true, usa LLM apenas para fallback (default: true) */
+  llmAsFallback?: boolean;
+  /** Callback para buscar dados do sistema (agendamentos, clientes, etc.) */
+  fetchSystemData?: (intent: string, entities: Record<string, string>) => Promise<string>;
+  /** Callback para executar ações (agendar, cancelar, etc.) */
+  executeToolAction?: (toolId: string, params: Record<string, string>) => Promise<string>;
 }
 
-// ─── Labels para parâmetros ───────────────────────────────
-
-const PARAM_LABELS: Record<string, string> = {
-  nome: "nome",
-  telefone: "telefone",
-  email: "email",
-  cpf: "CPF",
-  campo: "qual campo deseja alterar",
-  valor: "qual o valor",
-  valorCampo: "qual o novo valor",
-  termo: "o que deseja buscar",
-  pagina: "para qual pagina deseja ir",
-  metodo: "qual a forma de pagamento",
-  cliente: "nome do cliente",
-  funcionario: "nome do funcionario",
-  servico: "nome do servico",
-  preco: "qual o preco",
-  duracao: "qual a duracao em minutos",
-  saldo_inicial: "qual o saldo inicial",
-  descricao: "alguma descricao",
-  comissao: "qual o percentual de comissao",
-  observacoes: "alguma observacao",
-  filtro: "qual filtro aplicar",
-  nascimento: "data de nascimento",
-  endereco: "endereco",
-  notas: "notas ou observacoes",
-  especialidades: "especialidades (separadas por virgula)",
-  cor: "cor",
-  custo_material: "percentual de custo de material",
-  data: "qual a data",
-  hora: "qual o horario",
-};
-
-// ─── Mapeamento de entidades → parâmetros ────────────────
-
-function mapEntitiesToParams(
-  entities: ExtractedEntities,
-  tool: AgentTool,
-): Record<string, string> {
-  const params: Record<string, string> = {};
-  const allParams = [...tool.requiredParams, ...tool.optionalParams];
-
-  for (const paramName of allParams) {
-    // Mapeamento direto
-    if (paramName === "nome" && entities.nome) params.nome = entities.nome;
-    if (paramName === "telefone" && entities.telefone) params.telefone = entities.telefone;
-    if (paramName === "email" && entities.email) params.email = entities.email;
-    if (paramName === "cpf" && entities.cpf) params.cpf = entities.cpf;
-    if (paramName === "valor" && entities.valor) params.valor = entities.valor;
-    if (paramName === "metodo" && entities.metodo) params.metodo = entities.metodo;
-    if (paramName === "campo" && entities.campo) params.campo = entities.campo;
-    if (paramName === "pagina" && entities.pagina) params.pagina = entities.pagina;
-    if (paramName === "termo" && entities.termo) params.termo = entities.termo;
-    if (paramName === "cliente" && entities.nome) params.cliente = entities.nome;
-    if (paramName === "funcionario" && entities.funcionario) params.funcionario = entities.funcionario;
-    if (paramName === "servico" && entities.servico) params.servico = entities.servico;
-    if (paramName === "preco" && entities.preco) params.preco = entities.preco;
-    if (paramName === "duracao" && entities.duracao) params.duracao = entities.duracao;
-    if (paramName === "saldo_inicial" && entities.saldo_inicial) params.saldo_inicial = entities.saldo_inicial;
-    if (paramName === "descricao" && entities.descricao) params.descricao = entities.descricao;
-    if (paramName === "comissao" && entities.comissao) params.comissao = entities.comissao;
-    if (paramName === "nascimento" && entities.nascimento) params.nascimento = entities.nascimento;
-    if (paramName === "endereco" && entities.endereco) params.endereco = entities.endereco;
-    if (paramName === "notas" && entities.notas) params.notas = entities.notas;
-    if (paramName === "especialidades" && entities.especialidades) params.especialidades = entities.especialidades;
-    if (paramName === "cor" && entities.cor) params.cor = entities.cor;
-    if (paramName === "custo_material" && entities.custo_material) params.custo_material = entities.custo_material;
-    if (paramName === "observacoes" && entities.observacoes) params.observacoes = entities.observacoes;
-    if (paramName === "filtro" && entities.filtro) params.filtro = entities.filtro;
-    if (paramName === "data" && entities.data) params.data = entities.data;
-    if (paramName === "hora" && entities.hora) params.hora = entities.hora;
-
-    // Valor do campo para edição
-    if (paramName === "valor" && !params.valor && entities.valorCampo) {
-      params.valor = entities.valorCampo;
-    }
-  }
-
-  // Caso especial: "termo" para busca pode ser o nome
-  if (!params.termo && entities.nome) {
-    params.termo = entities.nome;
-  }
-
-  return params;
+export interface AgentResponse {
+  /** Texto da resposta para exibir ao usuário */
+  text: string;
+  /** Intent detectado */
+  intent: string;
+  /** Entidades extraídas */
+  entities: Record<string, string>;
+  /** Se uma ação foi executada */
+  actionExecuted: boolean;
+  /** Se está aguardando confirmação do usuário */
+  awaitingConfirmation: boolean;
+  /** Se está aguardando mais informações */
+  awaitingInput: boolean;
+  /** Parâmetro faltante (se awaitingInput) */
+  missingParam?: string;
+  /** Origem da resposta: "nlu" (local) ou "llm" (GitHub Models) */
+  source: "nlu" | "llm" | "fallback";
+  /** Confiança na classificação (0-1) */
+  confidence: number;
 }
 
-// ─── Greetings/thanks ───────────────────────────────────
+// ─── Estado do orquestrador ────────────────────────────────
 
-const GREETINGS = [
-  "Ola! Como posso ajudar? Posso gerenciar clientes, funcionarios, servicos, caixa e muito mais.",
-  "Oi! Estou pronto para ajudar. O que voce precisa?",
-  "Ola! Sou seu assistente virtual. Diga o que precisa e eu resolvo!",
-];
+let agentConfig: AgentConfig | null = null;
+let isInitialized = false;
 
-const THANKS_RESPONSES = [
-  "De nada! Se precisar de mais alguma coisa, e so falar.",
-  "Disponha! Estou aqui se precisar.",
-  "Por nada! Qualquer coisa, me chama.",
-];
-
-function randomPick(arr: string[]): string {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
-// ─── Pipeline principal ─────────────────────────────────
+// ─── Inicialização ─────────────────────────────────────────
 
 /**
- * Processa uma mensagem do usuário pelo pipeline do orquestrador.
- * Retorna null se a mensagem não foi tratada por nenhum tool
- * (para que o agentBrain possa tratá-la com a lógica existente).
+ * Inicializa o agente com as configurações fornecidas.
+ * Deve ser chamado antes de usar handleUserMessage().
  */
-export async function processMessage(text: string): Promise<OrchestratorResult> {
-  const phraseType = detectPhraseType(text);
-  const entities = extractEntities(text);
+export async function initAgent(config: AgentConfig): Promise<{ ok: boolean; message: string }> {
+  agentConfig = config;
 
-  // ── 0. Verificar confirmação/negação pendente ──
-  const pendingConfirm = getPendingConfirmation();
-  if (pendingConfirm) {
-    if (phraseType === "affirmation") {
-      clearPendingConfirmation();
-      const tool = getToolById(pendingConfirm.toolId);
-      if (tool) {
-        try {
-          const result = await tool.execute(pendingConfirm.params);
-          addUserTurn(text, pendingConfirm.toolId, entities, pendingConfirm.toolId);
-          addAgentTurn(result.message, pendingConfirm.toolId, pendingConfirm.toolId);
-          return {
-            message: result.message,
-            navigateTo: result.navigateTo,
-            handled: true,
-            toolId: pendingConfirm.toolId,
-            isAsync: true,
-          };
-        } catch (err) {
-          const errMsg = `Erro ao executar a acao: ${err instanceof Error ? err.message : "erro desconhecido"}`;
-          addAgentTurn(errMsg);
-          return { message: errMsg, handled: true };
-        }
-      }
-    }
-    if (phraseType === "denial") {
-      clearPendingConfirmation();
-      const msg = "Ok, acao cancelada.";
-      addUserTurn(text, "cancel", entities);
-      addAgentTurn(msg);
-      return { message: msg, handled: true };
-    }
+  // Configurar LLM
+  configureLLM({
+    apiToken: config.githubToken,
+    model: config.model ?? "openai/gpt-4o-mini",
+    temperature: 0.4,
+    maxTokens: 800,
+  });
+
+  // Testar conexão
+  const test = await testConnection();
+  isInitialized = test.ok;
+
+  if (!test.ok) {
+    console.warn("[agentOrchestrator] LLM não disponível, usando apenas NLU local:", test.message);
+    // Ainda funciona — apenas sem LLM
+    isInitialized = true;
+    return {
+      ok: true,
+      message: `Agente iniciado (modo offline — NLU local apenas). Motivo: ${test.message}`,
+    };
   }
 
-  // ── 1. Verificar pergunta pendente (parâmetro faltante) ──
+  return {
+    ok: true,
+    message: `Agente iniciado com sucesso! Modelo: ${test.model}`,
+  };
+}
+
+/** Verifica se o agente está pronto */
+export function isAgentReady(): boolean {
+  return isInitialized;
+}
+
+// ─── Handler principal ─────────────────────────────────────
+
+/**
+ * Processa uma mensagem do usuário e retorna a resposta do agente.
+ * Este é o ponto de entrada principal — orquestra todo o fluxo.
+ */
+export async function handleUserMessage(userMessage: string): Promise<AgentResponse> {
+  const trimmed = userMessage.trim();
+  if (!trimmed) {
+    return emptyResponse("Não entendi. Pode repetir?");
+  }
+
+  // ─── 1. Detectar follow-up e resolver referências ────────
+  const followUp = detectFollowUp(trimmed);
+  const resolvedRefs = resolveReferences(trimmed);
+
+  // Se é follow-up, mesclar referências resolvidas
+  if (followUp.isFollowUp && Object.keys(resolvedRefs).length > 0) {
+    mergeEntities(resolvedRefs);
+  }
+
+  // ─── 2. Verificar estados pendentes ──────────────────────
+
+  // 2a. Pergunta pendente (slot-filling ou parâmetro faltante)
   const pendingQ = getPendingQuestion();
   if (pendingQ) {
-    clearPendingQuestion();
-    const params = { ...pendingQ.collectedParams };
-    // A resposta do usuário é o valor do parâmetro faltante
-    const rawAnswer = text.trim();
+    return await handlePendingQuestionResponse(trimmed, pendingQ);
+  }
 
-    // Tentar extrair entidades do campo faltante
-    const answerEntities = extractEntities(rawAnswer);
-    if (pendingQ.missingParam === "nome" && (answerEntities.nome || rawAnswer)) {
-      params[pendingQ.missingParam] = answerEntities.nome ?? rawAnswer;
-    } else if (pendingQ.missingParam === "telefone" && (answerEntities.telefone || rawAnswer)) {
-      params[pendingQ.missingParam] = answerEntities.telefone ?? rawAnswer;
-    } else if (pendingQ.missingParam === "email" && (answerEntities.email || rawAnswer)) {
-      params[pendingQ.missingParam] = answerEntities.email ?? rawAnswer;
-    } else if (pendingQ.missingParam === "valor" && (answerEntities.valor || rawAnswer)) {
-      params[pendingQ.missingParam] = answerEntities.valor ?? rawAnswer;
-    } else {
-      params[pendingQ.missingParam] = rawAnswer;
+  // 2b. Confirmação pendente
+  const pendingC = getPendingConfirmation();
+  if (pendingC) {
+    return await handleConfirmationResponse(trimmed, pendingC);
+  }
+
+  // 2c. Slot-filling ativo
+  const slotState = getSlotFillingState();
+  if (slotState) {
+    return await handleSlotFillingResponse(trimmed, slotState);
+  }
+
+  // ─── 3. Classificar intent ──────────────────────────────
+
+  let intent: string = "outro";
+  let entities: Record<string, string> = {};
+  let confidence = 0;
+  let source: "nlu" | "llm" | "fallback" = "nlu";
+
+  // 3a. Tentar NLU local primeiro (rápido, sem custo)
+  const localResult = classifyLocally(trimmed);
+  intent = localResult.intent;
+  entities = localResult.entities;
+  confidence = localResult.confidence;
+
+  // 3b. Se confiança baixa e LLM disponível, usar LLM
+  const shouldUseLLM =
+    agentConfig?.alwaysUseLLM ||
+    (confidence < 0.6 && isLLMConfigured() && agentConfig?.llmAsFallback !== false);
+
+  if (shouldUseLLM && isLLMConfigured()) {
+    try {
+      const llmResult = await classifyIntent(trimmed);
+      // Usar resultado do LLM se tiver mais confiança
+      if (llmResult.confidence > confidence) {
+        intent = llmResult.intent;
+        entities = llmResult.entities;
+        confidence = llmResult.confidence;
+        source = "llm";
+      }
+    } catch (err) {
+      console.warn("[agentOrchestrator] LLM classification failed, using local:", err);
+    }
+  }
+
+  // Se é follow-up, herdar entidades do tópico ativo que não foram mencionadas
+  if (followUp.isFollowUp) {
+    const topicEntities = getRelevantEntities(0.2);
+    entities = { ...topicEntities, ...resolvedRefs, ...entities };
+  }
+
+  // ─── 4. Registrar turno do usuário ──────────────────────
+  addUserTurn(trimmed, intent, entities);
+
+  // ─── 5. Gerar resposta ─────────────────────────────────
+
+  let response: AgentResponse;
+
+  // Se tem ação a executar
+  if (isActionIntent(intent)) {
+    response = await handleActionIntent(intent, entities, trimmed, source, confidence);
+  }
+  // Se é conversação / pergunta
+  else {
+    response = await handleConversationalIntent(intent, entities, trimmed, source, confidence);
+  }
+
+  // ─── 6. Registrar turno do agente ──────────────────────
+  addAgentTurn(response.text, intent);
+
+  return response;
+}
+
+// ─── NLU Local (regex-based) ───────────────────────────────
+
+interface LocalClassification {
+  intent: string;
+  entities: Record<string, string>;
+  confidence: number;
+}
+
+function classifyLocally(text: string): LocalClassification {
+  const q = normalize(text);
+
+  // Saudações
+  if (/^(oi|ola|bom dia|boa tarde|boa noite|e ai|fala|hey|hi)\b/.test(q)) {
+    return { intent: "saudacao", entities: {}, confidence: 0.95 };
+  }
+
+  // Despedidas
+  if (/^(tchau|ate mais|ate logo|falou|vlw|valeu|obrigad)\b/.test(q)) {
+    return { intent: "despedida", entities: {}, confidence: 0.95 };
+  }
+
+  // Confirmação
+  if (/^(sim|confirma|confirmo|pode|ok|faz|executa|vai|manda|bora|claro|com certeza|pode sim|sim pode|confirmar)$/
+    .test(q)) {
+    return { intent: "confirmar", entities: {}, confidence: 0.95 };
+  }
+
+  // Negação
+  if (/^(nao|cancela|cancelar|nao quero|deixa|para|nao pode|negativo|nao faz)$/.test(q)) {
+    return { intent: "negar", entities: {}, confidence: 0.95 };
+  }
+
+  // Ajuda
+  if (/^(ajuda|help|o que voce faz|como funciona|quais comandos)\b/.test(q)) {
+    return { intent: "ajuda", entities: {}, confidence: 0.9 };
+  }
+
+  // Ver agendamentos
+  if (/agendamento|agenda|horario|marcad|compromisso/.test(q)) {
+    const entities: Record<string, string> = {};
+
+    if (q.includes("hoje")) entities.date = "hoje";
+    else if (q.includes("amanha")) entities.date = "amanha";
+    else if (q.includes("semana")) entities.date = "semana";
+
+    // Detectar se é ação ou consulta
+    if (/cancel[ae]|desmarqu?e?/.test(q)) {
+      return { intent: "cancelar_agendamento", entities, confidence: 0.85 };
+    }
+    if (/mov[ae]|troqu?e?|transfer[ei]|reagend[ae]|pass[ae]|remarqu?e?/.test(q)) {
+      return { intent: "mover_agendamento", entities, confidence: 0.85 };
+    }
+    if (/agend[ae]|marc[ae]|nov[ao]\s+agendamento/.test(q)) {
+      return { intent: "agendar", entities, confidence: 0.85 };
     }
 
-    const tool = getToolById(pendingQ.toolId);
-    if (tool) {
-      // Verificar se ainda faltam parâmetros
-      const stillMissing = tool.requiredParams.filter(p => !params[p]);
-      if (stillMissing.length > 0) {
-        const nextMissing = stillMissing[0];
-        const label = PARAM_LABELS[nextMissing] ?? nextMissing;
-        setPendingQuestion(tool.id, nextMissing, `Qual ${label}?`, params);
-        const msg = `Entendi! E ${label}?`;
-        addUserTurn(text, tool.id, answerEntities, tool.id);
-        addAgentTurn(msg, tool.id, tool.id);
-        return { message: msg, handled: true, toolId: tool.id };
-      }
+    return { intent: "ver_agendamentos", entities, confidence: 0.8 };
+  }
 
-      // Todos os parâmetros coletados
-      if (tool.confirmationRequired) {
-        const desc = formatConfirmationMessage(tool, params);
-        setPendingConfirmation(tool.id, params, desc);
-        addUserTurn(text, tool.id, answerEntities, tool.id);
-        addAgentTurn(desc, tool.id, tool.id);
-        return { message: desc, handled: true, toolId: tool.id };
-      }
+  // Cancelar (sem mencionar agendamento explicitamente)
+  if (/cancel[ae]|desmarqu?e?/.test(q)) {
+    return { intent: "cancelar_agendamento", entities: {}, confidence: 0.7 };
+  }
 
+  // Reagendar/mover (sem mencionar agendamento explicitamente)
+  if (/reagend[ae]|mov[ae].*para|troqu?e?.*para|transfer[ei]/.test(q)) {
+    return { intent: "mover_agendamento", entities: {}, confidence: 0.7 };
+  }
+
+  // Agendar novo
+  if (/agend[ae]|marc[ae]|quero\s+marcar|preciso\s+marcar|reserv[ae]/.test(q)) {
+    return { intent: "agendar", entities: {}, confidence: 0.75 };
+  }
+
+  // Clientes
+  if (/cliente|clientes/.test(q)) {
+    if (/busc|procur|encontr|ach/.test(q)) {
+      return { intent: "buscar_cliente", entities: {}, confidence: 0.8 };
+    }
+    return { intent: "ver_clientes", entities: {}, confidence: 0.8 };
+  }
+
+  // Serviços
+  if (/servico|servicos|preco|valor|tabela/.test(q)) {
+    return { intent: "ver_servicos", entities: {}, confidence: 0.8 };
+  }
+
+  // Funcionários
+  if (/funcionario|profissional|quem trabalha|equipe|colaborador/.test(q)) {
+    return { intent: "ver_funcionarios", entities: {}, confidence: 0.8 };
+  }
+
+  // Financeiro
+  if (/faturamento|financeiro|ganho|receita|comiss[ao]|relatorio/.test(q)) {
+    return { intent: "ver_financeiro", entities: {}, confidence: 0.8 };
+  }
+
+  // Não classificado
+  return { intent: "outro", entities: {}, confidence: 0.2 };
+}
+
+// ─── Handlers de intent ────────────────────────────────────
+
+function isActionIntent(intent: string): boolean {
+  return [
+    "cancelar_agendamento",
+    "mover_agendamento",
+    "reagendar",
+    "agendar",
+  ].includes(intent);
+}
+
+async function handleActionIntent(
+  intent: string,
+  entities: Record<string, string>,
+  userMessage: string,
+  source: "nlu" | "llm" | "fallback",
+  confidence: number,
+): Promise<AgentResponse> {
+  // Verificar se temos os parâmetros necessários
+  const required = getRequiredParams(intent);
+  const missing = required.filter(p => !(p.key in entities) || !entities[p.key]);
+
+  // Se faltam parâmetros, iniciar slot-filling
+  if (missing.length > 0) {
+    const filledSlots: Record<string, string> = {};
+    const missingSlots: Record<string, string> = {};
+
+    for (const param of required) {
+      if (entities[param.key]) {
+        filledSlots[param.key] = entities[param.key];
+      } else {
+        missingSlots[param.key] = param.prompt;
+      }
+    }
+
+    startSlotFilling(intent, intent, filledSlots, missingSlots);
+
+    // Perguntar o primeiro parâmetro faltante
+    const firstMissing = missing[0];
+    let promptText = firstMissing.prompt;
+
+    // Se LLM disponível, gerar prompt mais natural
+    if (isLLMConfigured() && agentConfig) {
       try {
-        const result = await tool.execute(params);
-        addUserTurn(text, tool.id, answerEntities, tool.id);
-        addAgentTurn(result.message, tool.id, tool.id);
+        promptText = await generateResponse(
+          `O usuário quer "${intent}" mas faltou informar: ${firstMissing.label}. Pergunte de forma natural e breve.`,
+          undefined,
+          agentConfig.businessContext,
+        );
+      } catch { /* usar prompt padrão */ }
+    }
+
+    return {
+      text: promptText,
+      intent,
+      entities,
+      actionExecuted: false,
+      awaitingConfirmation: false,
+      awaitingInput: true,
+      missingParam: firstMissing.key,
+      source,
+      confidence,
+    };
+  }
+
+  // Todos os parâmetros presentes — executar via callback ou pedir confirmação
+  if (agentConfig?.executeToolAction) {
+    // Para ações destrutivas, pedir confirmação
+    if (isDestructiveAction(intent)) {
+      const description = buildActionDescription(intent, entities);
+
+      // Usar LLM para gerar preview mais natural, se disponível
+      let confirmText = `${description}\n\nDeseja confirmar? Responda "sim" ou "não".`;
+      if (isLLMConfigured() && agentConfig) {
+        try {
+          confirmText = await generateResponse(
+            `O usuário quer ${intent}. Parâmetros: ${JSON.stringify(entities)}. Descreva o que será feito e peça confirmação. Seja breve.`,
+            undefined,
+            agentConfig.businessContext,
+          );
+          if (!/confirm|certeza|sim|nao/.test(confirmText.toLowerCase())) {
+            confirmText += '\n\nDeseja confirmar?';
+          }
+        } catch { /* usar texto padrão */ }
+      }
+
+      // Salvar confirmação pendente no contexto
+      const { setPendingConfirmation } = await import("./agentContext");
+      setPendingConfirmation(intent, entities, description);
+
+      return {
+        text: confirmText,
+        intent,
+        entities,
+        actionExecuted: false,
+        awaitingConfirmation: true,
+        awaitingInput: false,
+        source,
+        confidence,
+      };
+    }
+
+    // Ação não destrutiva — executar direto
+    try {
+      const result = await agentConfig.executeToolAction(intent, entities);
+      recordAction(intent, buildActionDescription(intent, entities), entities, result);
+
+      return {
+        text: result,
+        intent,
+        entities,
+        actionExecuted: true,
+        awaitingConfirmation: false,
+        awaitingInput: false,
+        source,
+        confidence,
+      };
+    } catch (err) {
+      return {
+        text: `Erro ao executar a ação: ${err instanceof Error ? err.message : String(err)}`,
+        intent,
+        entities,
+        actionExecuted: false,
+        awaitingConfirmation: false,
+        awaitingInput: false,
+        source,
+        confidence,
+      };
+    }
+  }
+
+  // Sem callback de execução — apenas informar
+  return {
+    text: buildActionDescription(intent, entities),
+    intent,
+    entities,
+    actionExecuted: false,
+    awaitingConfirmation: false,
+    awaitingInput: false,
+    source,
+    confidence,
+  };
+}
+
+async function handleConversationalIntent(
+  intent: string,
+  entities: Record<string, string>,
+  userMessage: string,
+  source: "nlu" | "llm" | "fallback",
+  confidence: number,
+): Promise<AgentResponse> {
+
+  // Respostas locais para intents simples
+  switch (intent) {
+    case "saudacao": {
+      const hour = new Date().getHours();
+      let greeting = "Olá";
+      if (hour < 12) greeting = "Bom dia";
+      else if (hour < 18) greeting = "Boa tarde";
+      else greeting = "Boa noite";
+
+      let text = `${greeting}! Como posso ajudar com a agenda?`;
+
+      // Se LLM disponível, resposta mais natural
+      if (isLLMConfigured() && agentConfig?.alwaysUseLLM) {
+        try {
+          text = await generateResponse(userMessage, undefined, agentConfig.businessContext);
+          source = "llm";
+        } catch { /* usar resposta local */ }
+      }
+
+      return makeResponse(text, intent, entities, source, confidence);
+    }
+
+    case "despedida": {
+      return makeResponse(
+        "Até mais! Qualquer coisa é só chamar. 👋",
+        intent, entities, source, confidence,
+      );
+    }
+
+    case "ajuda": {
+      return makeResponse(
+        `Posso ajudar com:\n` +
+        `• **Agendamentos** — ver, agendar, mover, cancelar\n` +
+        `• **Clientes** — buscar, ver histórico\n` +
+        `• **Serviços** — listar, ver preços\n` +
+        `• **Funcionários** — ver escala, trocar profissional\n` +
+        `• **Financeiro** — faturamento, comissões\n\n` +
+        `Basta me dizer o que precisa! Ex: "Quais agendamentos de hoje?" ou "Cancela o horário das 14h"`,
+        intent, entities, source, confidence,
+      );
+    }
+
+    case "confirmar":
+    case "negar": {
+      // Se não há nada pendente
+      return makeResponse(
+        "Não há nenhuma ação pendente no momento. O que gostaria de fazer?",
+        intent, entities, source, confidence,
+      );
+    }
+
+    default: {
+      // Para intents de consulta ou não classificados — usar LLM se disponível
+      if (isLLMConfigured() && agentConfig) {
+        try {
+          // Buscar dados do sistema se callback disponível
+          let systemData: string | undefined;
+          if (agentConfig.fetchSystemData) {
+            systemData = await agentConfig.fetchSystemData(intent, entities);
+          }
+
+          const llmResponse = await generateResponse(
+            userMessage,
+            systemData,
+            agentConfig.businessContext,
+          );
+
+          return makeResponse(llmResponse, intent, entities, "llm", confidence);
+        } catch (err) {
+          console.warn("[agentOrchestrator] LLM response failed:", err);
+        }
+      }
+
+      // Fallback local para consultas comuns
+      return handleLocalQuery(intent, entities, userMessage);
+    }
+  }
+}
+
+// ─── Handlers de estados pendentes ─────────────────────────
+
+async function handlePendingQuestionResponse(
+  text: string,
+  pending: { toolId: string; missingParam: string; collectedParams: Record<string, string> },
+): Promise<AgentResponse> {
+  // A resposta do usuário é o valor do parâmetro faltante
+  clearPendingQuestion();
+
+  const updatedParams = { ...pending.collectedParams, [pending.missingParam]: text };
+
+  // Verificar se há slot-filling ativo
+  const slotState = getSlotFillingState();
+  if (slotState) {
+    const remaining = fillSlot(pending.missingParam, text);
+
+    if (Object.keys(remaining).length > 0) {
+      // Ainda faltam slots
+      const nextSlot = Object.entries(remaining)[0];
+
+      addUserTurn(text, pending.toolId, { [pending.missingParam]: text });
+
+      const promptText = nextSlot[1]; // prompt do próximo slot
+      addAgentTurn(promptText, pending.toolId);
+
+      return {
+        text: promptText,
+        intent: pending.toolId,
+        entities: updatedParams,
+        actionExecuted: false,
+        awaitingConfirmation: false,
+        awaitingInput: true,
+        missingParam: nextSlot[0],
+        source: "nlu",
+        confidence: 0.9,
+      };
+    }
+
+    // Todos os slots preenchidos — executar
+    clearSlotFilling();
+    const allParams = { ...slotState.filledSlots, [pending.missingParam]: text };
+
+    addUserTurn(text, pending.toolId, { [pending.missingParam]: text });
+
+    // Re-processar como se tivesse todos os parâmetros
+    return await handleActionIntent(pending.toolId, allParams, text, "nlu", 0.9);
+  }
+
+  // Sem slot-filling — simplesmente re-processar
+  addUserTurn(text, pending.toolId, { [pending.missingParam]: text });
+  return await handleActionIntent(pending.toolId, updatedParams, text, "nlu", 0.9);
+}
+
+async function handleConfirmationResponse(
+  text: string,
+  pending: { toolId: string; params: Record<string, string>; description: string },
+): Promise<AgentResponse> {
+  const q = normalize(text);
+  clearPendingConfirmation();
+
+  // Verificar se é confirmação
+  if (/\b(sim|confirma|confirmo|pode|ok|faz|executa|vai|manda|bora|claro)\b/.test(q)) {
+    addUserTurn(text, "confirmar", {});
+
+    // Executar a ação
+    if (agentConfig?.executeToolAction) {
+      try {
+        const result = await agentConfig.executeToolAction(pending.toolId, pending.params);
+        recordAction(pending.toolId, pending.description, pending.params, result);
+
+        addAgentTurn(result, pending.toolId);
         return {
-          message: result.message,
-          navigateTo: result.navigateTo,
-          handled: true,
-          toolId: tool.id,
-          isAsync: true,
+          text: result,
+          intent: pending.toolId,
+          entities: pending.params,
+          actionExecuted: true,
+          awaitingConfirmation: false,
+          awaitingInput: false,
+          source: "nlu",
+          confidence: 1.0,
         };
       } catch (err) {
-        const errMsg = `Erro: ${err instanceof Error ? err.message : "erro desconhecido"}`;
-        addAgentTurn(errMsg);
-        return { message: errMsg, handled: true };
+        const errorMsg = `Erro ao executar: ${err instanceof Error ? err.message : String(err)}`;
+        addAgentTurn(errorMsg, pending.toolId);
+        return makeResponse(errorMsg, pending.toolId, pending.params, "nlu", 1.0);
       }
     }
+
+    return makeResponse("Ação confirmada.", pending.toolId, pending.params, "nlu", 1.0);
   }
 
-  // ── 2. Saudações e agradecimentos ──
-  if (phraseType === "greeting") {
-    const msg = randomPick(GREETINGS);
-    addUserTurn(text, "greeting", entities);
-    addAgentTurn(msg, "greeting");
-    return { message: msg, handled: true };
+  // Negação
+  if (/\b(nao|cancela|cancelar|nao quero|deixa|para|negativo)\b/.test(q)) {
+    addUserTurn(text, "negar", {});
+    const msg = "Ok, ação cancelada. Nenhuma alteração foi feita.";
+    addAgentTurn(msg, "negar");
+    return makeResponse(msg, "negar", {}, "nlu", 1.0);
   }
 
-  if (phraseType === "thanks") {
-    const msg = randomPick(THANKS_RESPONSES);
-    addUserTurn(text, "thanks", entities);
-    addAgentTurn(msg, "thanks");
-    return { message: msg, handled: true };
-  }
+  // Resposta ambígua — perguntar de novo
+  addUserTurn(text, "outro", {});
+  const msg = `Não entendi. Você quer confirmar a ação: "${pending.description}"? Responda "sim" ou "não".`;
+  addAgentTurn(msg, pending.toolId);
 
-  // ── 3. Detectar composição (múltiplas ações) ──
-  const composite = detectComposite(text);
-  if (composite.isComposite && composite.parts.length >= 2) {
-    const results: string[] = [];
-    let lastNavigate: string | undefined;
-    for (const part of composite.parts) {
-      const partResult = await processSingleIntent(part);
-      if (partResult.handled) {
-        results.push(partResult.message);
-        if (partResult.navigateTo) lastNavigate = partResult.navigateTo;
-      }
-    }
-    if (results.length > 0) {
-      const msg = results.join("\n\n---\n\n");
-      addUserTurn(text, "composite", entities);
-      addAgentTurn(msg, "composite");
-      return { message: msg, navigateTo: lastNavigate, handled: true };
-    }
-  }
+  // Re-salvar a confirmação pendente
+  const { setPendingConfirmation } = await import("./agentContext");
+  setPendingConfirmation(pending.toolId, pending.params, pending.description);
 
-  // ── 4. Classificar intenção e executar ──
-  return processSingleIntent(text);
-}
-
-/** Processa uma única intenção (usado tanto no fluxo normal quanto em composição) */
-async function processSingleIntent(text: string): Promise<OrchestratorResult> {
-  const entities = extractEntities(text);
-  const scores = classifyIntent(text);
-  const best = scores.length > 0 ? scores[0] : null;
-
-  if (!best || best.score < 3) {
-    // Nenhum tool match — retornar para agentBrain tratar
-    addUserTurn(text, undefined, entities);
-    return { message: "", handled: false };
-  }
-
-  // ── Desambiguação ──
-  if (scores.length >= 2 && best.confidence === "low" && scores[1].score >= best.score - 1) {
-    const options = scores.slice(0, 3).map((s, i) => `${i + 1}. ${getToolById(s.toolId)?.name ?? s.intent}`);
-    const msg = `Nao tenho certeza do que voce quer. Voce quis dizer:\n\n${options.join("\n")}\n\nPode especificar melhor?`;
-    addUserTurn(text, "ambiguous", entities);
-    addAgentTurn(msg, "ambiguous");
-    return { message: msg, handled: true };
-  }
-
-  const tool = getToolById(best.toolId);
-  if (!tool) {
-    addUserTurn(text, best.intent, entities);
-    return { message: "", handled: false };
-  }
-
-  // ── Mapear entidades → parâmetros ──
-  // Para tools que criam ou agendam, NÃO herdar "nome" do contexto anterior
-  // pois o nome deve vir explicitamente do comando atual
-  const TOOLS_REQUIRE_FRESH_NOME = new Set([
-    "criar_agendamento", "cancelar_agendamento", "mover_agendamento",
-    "criar_cliente", "excluir_cliente",
-  ]);
-  let contextEntities = hasRecentConversation() ? getLastEntities() : {};
-  if (TOOLS_REQUIRE_FRESH_NOME.has(tool.id)) {
-    // Remove "nome" do contexto para forçar extração do texto atual
-    const { nome: _ignoredNome, ...restContext } = contextEntities;
-    contextEntities = restContext;
-  }
-  const mergedEntities = { ...contextEntities, ...entities };
-  const params = mapEntitiesToParams(mergedEntities, tool);
-
-  // Passa o texto original para tools que precisam fazer re-extração de segurança
-  params._rawText = text;
-
-  // ── Verificar parâmetros obrigatórios ──
-  const missing = tool.requiredParams.filter(p => !params[p]);
-  if (missing.length > 0) {
-    const firstMissing = missing[0];
-    const label = PARAM_LABELS[firstMissing] ?? firstMissing;
-    setPendingQuestion(tool.id, firstMissing, `Qual ${label}?`, params);
-    const msg = `Certo! Para ${tool.description}, preciso saber: qual ${label}?`;
-    addUserTurn(text, best.intent, entities, tool.id);
-    addAgentTurn(msg, best.intent, tool.id);
-    return { message: msg, handled: true, toolId: tool.id };
-  }
-
-  // ── Confirmação ──
-  if (tool.confirmationRequired) {
-    const desc = formatConfirmationMessage(tool, params);
-    setPendingConfirmation(tool.id, params, desc);
-    addUserTurn(text, best.intent, entities, tool.id);
-    addAgentTurn(desc, best.intent, tool.id);
-    return { message: desc, handled: true, toolId: tool.id };
-  }
-
-  // ── Executar ──
-  try {
-    const result = await tool.execute(params);
-    addUserTurn(text, best.intent, entities, tool.id);
-    addAgentTurn(result.message, best.intent, tool.id);
-    clearEntities();
-    return {
-      message: result.message,
-      navigateTo: result.navigateTo,
-      handled: true,
-      toolId: tool.id,
-      isAsync: true,
-    };
-  } catch (err) {
-    const errMsg = `Desculpe, ocorreu um erro ao executar essa acao: ${err instanceof Error ? err.message : "erro desconhecido"}. Tente novamente.`;
-    addUserTurn(text, best.intent, entities, tool.id);
-    addAgentTurn(errMsg, best.intent, tool.id);
-    return { message: errMsg, handled: true };
-  }
-}
-
-// ─── Helpers ────────────────────────────────────────────
-
-function formatConfirmationMessage(tool: AgentTool, params: Record<string, string>): string {
-  const paramLines = Object.entries(params)
-    .map(([k, v]) => `- ${PARAM_LABELS[k] ?? k}: **${v}**`)
-    .join("\n");
-
-  return `Vou **${tool.description}** com os seguintes dados:\n\n${paramLines}\n\nConfirma? (sim/nao)`;
-}
-
-// ─── Sugestões proativas inteligentes ───────────────────
-
-export interface ProactiveSuggestion {
-  id: string;
-  message: string;
-  priority: "high" | "medium" | "low";
-  action?: string;
-}
-
-export function getProactiveSuggestions(): ProactiveSuggestion[] {
-  const suggestions: ProactiveSuggestion[] = [];
-
-  // Sugestão de abertura de caixa
-  try {
-    const { cashSessionsStore } = require("./store");
-    const current = cashSessionsStore.getCurrent();
-    if (!current) {
-      const now = new Date();
-      if (now.getHours() >= 7 && now.getHours() <= 10) {
-        suggestions.push({
-          id: "open_cash",
-          message: "Bom dia! O caixa ainda nao foi aberto. Quer que eu abra?",
-          priority: "high",
-          action: "abrir caixa",
-        });
-      }
-    }
-  } catch { /* ignore */ }
-
-  // Sugestão de fechamento de caixa
-  try {
-    const { cashSessionsStore } = require("./store");
-    const current = cashSessionsStore.getCurrent();
-    if (current) {
-      const now = new Date();
-      if (now.getHours() >= 19) {
-        suggestions.push({
-          id: "close_cash",
-          message: "Ja e fim de expediente. Quer fechar o caixa de hoje?",
-          priority: "medium",
-          action: "fechar caixa",
-        });
-      }
-    }
-  } catch { /* ignore */ }
-
-  return suggestions;
-}
-
-// ─── Quick actions dinâmicas ────────────────────────────
-
-export interface DynamicQuickAction {
-  label: string;
-  query: string;
-  icon?: string;
-}
-
-export function getDynamicQuickActions(currentPage: string): DynamicQuickAction[] {
-  const page = currentPage.replace(/^\//, "").split("/")[0] || "dashboard";
-  const actions: DynamicQuickAction[] = [];
-
-  const baseActions: Record<string, DynamicQuickAction[]> = {
-    dashboard: [
-      { label: "Resumo do dia", query: "resumo de hoje", icon: "chart" },
-      { label: "Faturamento do mes", query: "quanto faturei este mes?", icon: "dollar" },
-      { label: "Abrir caixa", query: "abrir caixa", icon: "cash" },
-      { label: "Clientes inativos", query: "listar clientes inativos", icon: "users" },
-    ],
-    agenda: [
-      { label: "Agenda de hoje", query: "listar agendamentos de hoje", icon: "calendar" },
-      { label: "Novo agendamento", query: "agendar cliente", icon: "plus" },
-      { label: "Cancelar agendamento", query: "cancelar agendamento de", icon: "x" },
-      { label: "Reagendar", query: "reagendar agendamento de", icon: "clock" },
-    ],
-    clientes: [
-      { label: "Cadastrar cliente", query: "cadastrar novo cliente", icon: "plus" },
-      { label: "Clientes inativos", query: "listar clientes inativos", icon: "users" },
-      { label: "Buscar cliente", query: "buscar cliente", icon: "search" },
-      { label: "Aniversariantes", query: "aniversariantes da semana", icon: "cake" },
-    ],
-    funcionarios: [
-      { label: "Cadastrar funcionario", query: "cadastrar novo funcionario", icon: "plus" },
-      { label: "Ver equipe", query: "listar funcionarios", icon: "users" },
-      { label: "Comissoes", query: "quanto devo de comissao?", icon: "dollar" },
-    ],
-    servicos: [
-      { label: "Cadastrar servico", query: "cadastrar novo servico", icon: "plus" },
-      { label: "Ver catalogo", query: "listar servicos", icon: "list" },
-      { label: "Mais populares", query: "quais servicos mais populares?", icon: "star" },
-    ],
-    caixa: [
-      { label: "Status do caixa", query: "como esta o caixa?", icon: "cash" },
-      { label: "Registrar pagamento", query: "registrar pagamento", icon: "dollar" },
-      { label: "Fechar caixa", query: "fechar caixa", icon: "x" },
-    ],
-    relatorios: [
-      { label: "Faturamento semanal", query: "relatorio de faturamento da semana", icon: "chart" },
-      { label: "Servicos populares", query: "servicos mais populares do mes", icon: "star" },
-      { label: "Resumo completo", query: "resumo completo do mes", icon: "file" },
-    ],
-    configuracoes: [
-      { label: "Alterar nome", query: "alterar nome do salao", icon: "edit" },
-      { label: "Backup", query: "exportar backup", icon: "download" },
-    ],
-    backup: [
-      { label: "Exportar backup", query: "exportar backup", icon: "download" },
-    ],
-    historico: [
-      { label: "Historico geral", query: "historico de atendimentos", icon: "clock" },
-    ],
+  return {
+    text: msg,
+    intent: pending.toolId,
+    entities: pending.params,
+    actionExecuted: false,
+    awaitingConfirmation: true,
+    awaitingInput: false,
+    source: "nlu",
+    confidence: 0.5,
   };
-
-  const pageActions = baseActions[page] ?? baseActions.dashboard;
-  actions.push(...pageActions);
-
-  // Ações contextuais baseadas no último intent
-  const lastIntent = getLastIntent();
-  if (lastIntent) {
-    if (lastIntent === "criar_cliente") {
-      actions.unshift({ label: "Cadastrar outro cliente", query: "cadastrar novo cliente", icon: "plus" });
-    }
-    if (lastIntent === "buscar_cliente") {
-      actions.unshift({ label: "Buscar outro", query: "buscar cliente", icon: "search" });
-    }
-    if (lastIntent === "criar_agendamento") {
-      actions.unshift({ label: "Novo agendamento", query: "agendar cliente", icon: "plus" });
-    }
-    if (lastIntent === "listar_agendamentos") {
-      actions.unshift({ label: "Agendar novo", query: "agendar cliente", icon: "plus" });
-    }
-  }
-
-  // Limitar a 6 ações
-  return actions.slice(0, 6);
 }
 
-// ─── Phrase templates ───────────────────────────────────
+async function handleSlotFillingResponse(
+  text: string,
+  slotState: SlotFillingState,
+): Promise<AgentResponse> {
+  // Verificar se o usuário quer cancelar o fluxo
+  const q = normalize(text);
+  if (/\b(cancela|cancelar|deixa|para|esquece|desiste)\b/.test(q)) {
+    clearSlotFilling();
+    addUserTurn(text, "negar", {});
+    const msg = "Ok, fluxo cancelado.";
+    addAgentTurn(msg, "negar");
+    return makeResponse(msg, "negar", {}, "nlu", 1.0);
+  }
 
-export const PHRASE_TEMPLATES = [
-  // Clientes
-  "Cadastrar cliente {nome}",
-  "Buscar cliente {nome}",
-  "Historico do cliente {nome}",
-  "Clientes inativos",
-  "Aniversariantes da semana",
-  // Funcionários
-  "Cadastrar funcionario {nome}",
-  "Listar funcionarios",
-  "Ver comissoes",
-  // Serviços
-  "Cadastrar servico {nome} por R$ {valor}",
-  "Listar servicos",
-  // Agendamentos
-  "Agendar {nome} para hoje as {hora}",
-  "Agendar {nome} amanha as {hora} com {funcionario}",
-  "Cancelar agendamento de {nome}",
-  "Reagendar {nome} para {hora}",
-  "Ver agendamentos de hoje",
-  "Agendamentos de amanha",
-  // Caixa
-  "Abrir caixa",
-  "Fechar caixa",
-  "Status do caixa",
-  "Registrar pagamento de {nome} R$ {valor} em {metodo}",
-  // Navegação
-  "Ir para {pagina}",
-  // Relatórios
-  "Resumo de hoje",
-  "Faturamento da semana",
-  "Relatorio completo do mes",
-  // Config
-  "Alterar nome do salao para {nome}",
-  "Exportar backup",
-];
+  // Determinar qual slot está sendo preenchido
+  const missingEntries = Object.entries(slotState.missingSlots);
+  if (missingEntries.length === 0) {
+    // Todos preenchidos — executar
+    clearSlotFilling();
+    addUserTurn(text, slotState.flowId, {});
+    return await handleActionIntent(slotState.flowId, slotState.filledSlots, text, "nlu", 0.9);
+  }
 
+  // Preencher o próximo slot
+  const [slotName] = missingEntries[0];
+  const remaining = fillSlot(slotName, text);
+
+  addUserTurn(text, slotState.flowId, { [slotName]: text });
+
+  if (Object.keys(remaining).length > 0) {
+    const nextEntry = Object.entries(remaining)[0];
+    const promptText = nextEntry[1];
+    addAgentTurn(promptText, slotState.flowId);
+
+    return {
+      text: promptText,
+      intent: slotState.flowId,
+      entities: { ...slotState.filledSlots, [slotName]: text },
+      actionExecuted: false,
+      awaitingConfirmation: false,
+      awaitingInput: true,
+      missingParam: nextEntry[0],
+      source: "nlu",
+      confidence: 0.9,
+    };
+  }
+
+  // Todos preenchidos agora
+  clearSlotFilling();
+  const allParams = { ...slotState.filledSlots, [slotName]: text };
+  return await handleActionIntent(slotState.flowId, allParams, text, "nlu", 0.9);
+}
+
+// ─── Helpers ───────────────────────────────────────────────
+
+function normalize(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[?!.,;:]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function makeResponse(
+  text: string,
+  intent: string,
+  entities: Record<string, string>,
+  source: "nlu" | "llm" | "fallback",
+  confidence: number,
+): AgentResponse {
+  return {
+    text,
+    intent,
+    entities,
+    actionExecuted: false,
+    awaitingConfirmation: false,
+    awaitingInput: false,
+    source,
+    confidence,
+  };
+}
+
+function emptyResponse(text: string): AgentResponse {
+  return makeResponse(text, "outro", {}, "fallback", 0);
+}
+
+function isDestructiveAction(intent: string): boolean {
+  return ["cancelar_agendamento", "mover_agendamento", "reagendar"].includes(intent);
+}
+
+interface RequiredParam {
+  key: string;
+  label: string;
+  prompt: string;
+}
+
+function getRequiredParams(intent: string): RequiredParam[] {
+  switch (intent) {
+    case "agendar":
+      return [
+        { key: "clientName", label: "Cliente", prompt: "Para qual cliente deseja agendar?" },
+        { key: "serviceName", label: "Serviço", prompt: "Qual serviço?" },
+        { key: "date", label: "Data", prompt: "Para qual data?" },
+        { key: "time", label: "Horário", prompt: "Qual horário?" },
+      ];
+    case "cancelar_agendamento":
+      return [
+        { key: "date", label: "Data", prompt: "Cancelar agendamentos de qual data?" },
+      ];
+    case "mover_agendamento":
+    case "reagendar":
+      return [
+        { key: "sourceDate", label: "Data de origem", prompt: "Mover de qual data?" },
+        { key: "targetDate", label: "Data de destino", prompt: "Para qual data?" },
+      ];
+    default:
+      return [];
+  }
+}
+
+function buildActionDescription(intent: string, entities: Record<string, string>): string {
+  switch (intent) {
+    case "cancelar_agendamento": {
+      const parts = ["Cancelar agendamento(s)"];
+      if (entities.clientName) parts.push(`de ${entities.clientName}`);
+      if (entities.date) parts.push(`em ${entities.date}`);
+      return parts.join(" ");
+    }
+    case "mover_agendamento":
+    case "reagendar": {
+      const parts = ["Mover agendamento(s)"];
+      if (entities.clientName) parts.push(`de ${entities.clientName}`);
+      if (entities.sourceDate) parts.push(`de ${entities.sourceDate}`);
+      if (entities.targetDate) parts.push(`para ${entities.targetDate}`);
+      if (entities.targetTime) parts.push(`às ${entities.targetTime}`);
+      return parts.join(" ");
+    }
+    case "agendar": {
+      const parts = ["Agendar"];
+      if (entities.serviceName) parts.push(entities.serviceName);
+      if (entities.clientName) parts.push(`para ${entities.clientName}`);
+      if (entities.date) parts.push(`em ${entities.date}`);
+      if (entities.time) parts.push(`às ${entities.time}`);
+      return parts.join(" ");
+    }
+    default:
+      return `Executar ${intent}`;
+  }
+}
+
+function handleLocalQuery(
+  intent: string,
+  entities: Record<string, string>,
+  userMessage: string,
+): AgentResponse {
+  // Respostas genéricas para intents de consulta sem LLM
+  switch (intent) {
+    case "ver_agendamentos":
+      return makeResponse(
+        "Consultando agendamentos... (conecte a função fetchSystemData para ver dados reais)",
+        intent, entities, "fallback", 0.5,
+      );
+    case "ver_clientes":
+    case "buscar_cliente":
+      return makeResponse(
+        "Consultando clientes... (conecte a função fetchSystemData para ver dados reais)",
+        intent, entities, "fallback", 0.5,
+      );
+    case "ver_servicos":
+      return makeResponse(
+        "Consultando serviços... (conecte a função fetchSystemData para ver dados reais)",
+        intent, entities, "fallback", 0.5,
+      );
+    case "ver_funcionarios":
+      return makeResponse(
+        "Consultando funcionários... (conecte a função fetchSystemData para ver dados reais)",
+        intent, entities, "fallback", 0.5,
+      );
+    default:
+      return makeResponse(
+        "Desculpe, não entendi bem. Pode reformular? Tente algo como: 'Quais agendamentos de hoje?' ou 'Cancela o horário das 14h'.",
+        intent, entities, "fallback", 0.2,
+      );
+  }
+}
+
+// ─── Exportações extras ────────────────────────────────────
+
+/** Reseta o agente (limpa conversa e estado) */
+export function resetAgent(): void {
+  resetConversation();
+}
+
+/** Atualiza a página atual no contexto */
+export function updateCurrentPage(page: string): void {
+  setCurrentPage(page);
+}
+
+/** Retorna o resumo do contexto (para debug) */
+export function getDebugContext(): string {
+  return getContextSummaryForPrompt();
+}
