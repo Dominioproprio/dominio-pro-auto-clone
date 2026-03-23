@@ -84,6 +84,8 @@ const PARAM_LABELS: Record<string, string> = {
   especialidades: "especialidades (separadas por virgula)",
   cor: "cor",
   custo_material: "percentual de custo de material",
+  data: "qual a data",
+  hora: "qual o horario",
 };
 
 // ─── Mapeamento de entidades → parâmetros ────────────────
@@ -122,6 +124,8 @@ function mapEntitiesToParams(
     if (paramName === "custo_material" && entities.custo_material) params.custo_material = entities.custo_material;
     if (paramName === "observacoes" && entities.observacoes) params.observacoes = entities.observacoes;
     if (paramName === "filtro" && entities.filtro) params.filtro = entities.filtro;
+    if (paramName === "data" && entities.data) params.data = entities.data;
+    if (paramName === "hora" && entities.hora) params.hora = entities.hora;
 
     // Valor do campo para edição
     if (paramName === "valor" && !params.valor && entities.valorCampo) {
