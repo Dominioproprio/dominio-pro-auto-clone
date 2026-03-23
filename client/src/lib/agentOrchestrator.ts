@@ -335,9 +335,23 @@ async function processSingleIntent(text: string): Promise<OrchestratorResult> {
   }
 
   // ── Mapear entidades → parâmetros ──
-  const contextEntities = hasRecentConversation() ? getLastEntities() : {};
+  // Para tools que criam ou agendam, NÃO herdar "nome" do contexto anterior
+  // pois o nome deve vir explicitamente do comando atual
+  const TOOLS_REQUIRE_FRESH_NOME = new Set([
+    "criar_agendamento", "cancelar_agendamento", "mover_agendamento",
+    "criar_cliente", "excluir_cliente",
+  ]);
+  let contextEntities = hasRecentConversation() ? getLastEntities() : {};
+  if (TOOLS_REQUIRE_FRESH_NOME.has(tool.id)) {
+    // Remove "nome" do contexto para forçar extração do texto atual
+    const { nome: _ignoredNome, ...restContext } = contextEntities;
+    contextEntities = restContext;
+  }
   const mergedEntities = { ...contextEntities, ...entities };
   const params = mapEntitiesToParams(mergedEntities, tool);
+
+  // Passa o texto original para tools que precisam fazer re-extração de segurança
+  params._rawText = text;
 
   // ── Verificar parâmetros obrigatórios ──
   const missing = tool.requiredParams.filter(p => !params[p]);
@@ -565,3 +579,4 @@ export const PHRASE_TEMPLATES = [
   "Alterar nome do salao para {nome}",
   "Exportar backup",
 ];
+
