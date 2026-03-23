@@ -2,7 +2,7 @@
  * FerramentasClientesPage — Importar cadastro de clientes, detectar e mesclar duplicados.
  * Design: Glass Dashboard — tema escuro, accent rosa, backdrop-blur.
  */
-import { useState, useMemo, useRef, useCallback, useEffect } from "react";
+import { useState, useMemo, useRef, useCallback } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -76,24 +76,6 @@ function mergeClientGroup(group: Client[]): { keep: Client; removeIds: number[] 
 }
 
 /** Parse CSV text para array de objetos */
-/**
- * Sanitiza texto para corrigir double-encoding comum em planilhas Windows/Excel BR.
- * Ex: "GonÃ§alves" (latin1 lido como UTF-8) → "Gonçalves"
- * Tenta decodificar via TextDecoder se detectar o padrão corrompido.
- */
-function sanitizeEncoding(text: string): string {
-  if (!text) return text;
-  // Detecta o padrão clássico de latin1-como-UTF8: sequências Ã seguidas de char estranho
-  if (!/Ã[€-¿]|Â[€-¿]|Ã[À-ÿ]/.test(text)) return text;
-  try {
-    // Reconstrói bytes a partir dos char codes e re-decodifica como latin1
-    const bytes = new Uint8Array(text.split("").map(c => c.charCodeAt(0) & 0xff));
-    return new TextDecoder("iso-8859-1").decode(bytes);
-  } catch {
-    return text;
-  }
-}
-
 function parseCSV(text: string): Record<string, string>[] {
   const lines = text.split(/\r?\n/).filter(l => l.trim());
   if (lines.length < 2) return [];
@@ -130,13 +112,13 @@ function mapToClient(row: Record<string, string>): Omit<Client, "id" | "createdA
   const address   = row["endereço"]  || row["endereco"]        || row["address"]        || row["logradouro"] || row["rua"] || null;
   const notes     = row["observacao"]|| row["observações"]     || row["obs"]            || row["notes"] || row["notas"] || null;
   return {
-    name:      sanitizeEncoding(name.trim()),
-    email:     email     ? sanitizeEncoding(email.trim())     : null,
-    phone:     phone     ? sanitizeEncoding(phone.trim())     : null,
-    birthDate: birthDate ? sanitizeEncoding(birthDate.trim()) : null,
-    cpf:       cpf       ? sanitizeEncoding(cpf.trim())       : null,
-    address:   address   ? sanitizeEncoding(address.trim())   : null,
-    notes:     notes     ? sanitizeEncoding(notes.trim())     : null,
+    name:      name.trim(),
+    email:     email?.trim()     || null,
+    phone:     phone?.trim()     || null,
+    birthDate: birthDate?.trim() || null,
+    cpf:       cpf?.trim()       || null,
+    address:   address?.trim()   || null,
+    notes:     notes?.trim()     || null,
   };
 }
 
@@ -237,17 +219,7 @@ export default function FerramentasClientesPage() {
 
   const refresh = () => setRefreshKey(k => k + 1);
 
-  useEffect(() => {
-    const onUpdate = () => setRefreshKey(k => k + 1);
-    window.addEventListener("clients_updated", onUpdate);
-    window.addEventListener("store_updated", onUpdate);
-    return () => {
-      window.removeEventListener("clients_updated", onUpdate);
-      window.removeEventListener("store_updated", onUpdate);
-    };
-  }, []);
-
-
+  // ─── Importação ─────────────────────────────────────────
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -270,9 +242,7 @@ export default function FerramentasClientesPage() {
       reader.onload = (ev) => {
         try {
           const data = new Uint8Array(ev.target?.result as ArrayBuffer);
-          // type:"array" + codepage 1252 garante leitura correta de .xls/.xlsx
-          // gerados pelo Excel BR (Windows-1252 / latin1)
-          const workbook = XLSX.read(data, { type: "array", codepage: 1252 });
+          const workbook = XLSX.read(data, { type: "array" });
           const sheet = workbook.Sheets[workbook.SheetNames[0]];
           const rows: Record<string, string>[] = XLSX.utils.sheet_to_json(sheet, { defval: "" });
           const normalized = rows.map(row =>
@@ -292,52 +262,30 @@ export default function FerramentasClientesPage() {
       };
       reader.readAsArrayBuffer(file);
     } else {
-      // Detecta encoding: tenta UTF-8 primeiro; se houver caracteres inválidos,
-      // refaz com ISO-8859-1 (padrão de planilhas exportadas no Windows/Excel BR)
-      const readWithEncoding = (encoding: string) =>
-        new Promise<string>((resolve, reject) => {
-          const r = new FileReader();
-          r.onload = (ev) => resolve(ev.target?.result as string);
-          r.onerror = reject;
-          r.readAsText(file, encoding);
-        });
-
-      const processText = async (text: string) => {
-        if (file.name.endsWith(".json")) {
-          const json = JSON.parse(text);
-          const arr = Array.isArray(json) ? json : json.clients || json.clientes || [];
-          const parsed = arr.map((item: any) => mapToClient(item)).filter(Boolean) as Omit<Client, "id" | "createdAt">[];
-          if (parsed.length === 0) {
-            toast.error("Nenhum cliente encontrado no arquivo. Verifique se há uma coluna 'nome'.");
-            return;
-          }
-          setImportPreview(parsed);
-          setImportModalOpen(true);
-        } else {
-          processRows(parseCSV(text));
-        }
-      };
-
-      (async () => {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
         try {
-          // 1ª tentativa: UTF-8
-          let text = await readWithEncoding("UTF-8");
-
-          // Detecta double-encoding: sequência típica de latin1 lido como UTF-8
-          // ex: "Ã§" = ç mal decodificado, "Ã£" = ã, "Ã©" = é
-          const hasGarbled = /Ã[€-¿]|Â[€-¿]/.test(text);
-          if (hasGarbled) {
-            // Refaz com ISO-8859-1 (latin1) — encoding padrão do Excel BR
-            text = await readWithEncoding("ISO-8859-1");
+          const text = ev.target?.result as string;
+          if (file.name.endsWith(".json")) {
+            const json = JSON.parse(text);
+            const arr = Array.isArray(json) ? json : json.clients || json.clientes || [];
+            const parsed = arr.map((item: any) => mapToClient(item)).filter(Boolean) as Omit<Client, "id" | "createdAt">[];
+            if (parsed.length === 0) {
+              toast.error("Nenhum cliente encontrado no arquivo. Verifique se há uma coluna 'nome'.");
+              return;
+            }
+            setImportPreview(parsed);
+            setImportModalOpen(true);
+          } else {
+            processRows(parseCSV(text));
           }
-
-          await processText(text);
         } catch {
           toast.error("Erro ao ler o arquivo. Verifique o formato.");
         } finally {
           if (fileInputRef.current) fileInputRef.current.value = "";
         }
-      })();
+      };
+      reader.readAsText(file);
     }
   }, []);
 
@@ -368,13 +316,9 @@ export default function FerramentasClientesPage() {
     setImporting(true);
     try {
       await clientsStore.createMany(importPreview);
-      await clientsStore.fetchAll();
       toast.success(`${importPreview.length} cliente(s) importado(s) com sucesso!`);
       setImportModalOpen(false);
       setImportPreview([]);
-      // Resetar ambos os inputs para permitir reimportar o mesmo arquivo
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      if (vcfInputRef.current) vcfInputRef.current.value = "";
       refresh();
     } catch (err: any) {
       const msg = err?.message || err?.error_description || JSON.stringify(err) || "Erro desconhecido";
