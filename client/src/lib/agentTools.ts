@@ -914,6 +914,17 @@ export const tools: AgentTool[] = [
     optionalParams: ["data", "hora", "funcionario", "servico", "observacoes"],
     confirmationRequired: false,
     execute: async (params) => {
+      // ── Segurança: re-extrair nome via padrão "cliente X" se disponível ──
+      // Isso garante que o nome correto seja usado mesmo se o NLU errou
+      if (params._rawText) {
+        const clienteMatch = params._rawText.match(
+          /cliente\s+([A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ\s]{1,59})(?:\s*(?:,|$))/i
+        );
+        if (clienteMatch && clienteMatch[1]) {
+          params.nome = clienteMatch[1].trim();
+        }
+      }
+
       // ── 1. Validar cliente no banco ──
       const client = findClientByName(params.nome);
       if (!client) {
@@ -1450,3 +1461,4 @@ export function findToolByDescription(query: string): AgentTool | null {
   }
   return null;
 }
+
