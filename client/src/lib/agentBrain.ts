@@ -22,6 +22,27 @@ import {
   cashEntriesStore,
 } from "./store";
 import { calcPeriodStats, getAppointmentsInPeriod, getPeriodDates } from "./analytics";
+import { isScheduleCommand, processCommand } from "./agentCommands";
+import { generateOnDemandReport } from "./agentReports";
+import {
+  isAgendaActionCommand,
+  parseAgendaAction,
+  prepareAction,
+  executeAction,
+  cancelPendingAction,
+  getLatestPendingAction,
+  isConfirmation,
+  isDenial,
+} from "./agentActions";
+import {
+  checkDueTasks,
+  getUnreadNotifications,
+  addNotification,
+  sendBrowserNotification,
+  listActiveTasks,
+  formatTaskDescription,
+} from "./agentScheduler";
+import { generateReport } from "./agentReports";
 
 // ─── Tipos ─────────────────────────────────────────────────
 
@@ -502,6 +523,58 @@ export function generateSuggestions(): AgentSuggestion[] {
 
 export function answerQuestion(question: string): string {
   const q = question.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+  // ── 0. Verificar se e confirmacao/negacao de acao pendente ──
+  const pendingAction = getLatestPendingAction();
+  if (pendingAction) {
+    if (isConfirmation(question)) {
+      const result = executeAction(pendingAction.id);
+      return result.message;
+    }
+    if (isDenial(question)) {
+      const result = cancelPendingAction(pendingAction.id);
+      return result.message;
+    }
+  }
+
+  // ── 1. Verificar se e um comando de acao na agenda ────────
+  if (isAgendaActionCommand(question)) {
+    const params = parseAgendaAction(question);
+    if (params) {
+      const result = prepareAction(params);
+      return result.message;
+    }
+    return "Entendi que voce quer alterar agendamentos, mas nao consegui interpretar todos os detalhes. Tente algo como:\n\n" +
+      "- \"Troque os agendamentos de [nome] de segunda para sabado dia 5\"\n" +
+      "- \"Cancela os agendamentos de amanha\"\n" +
+      "- \"Move os agendamentos do Joao de hoje para sexta\"";
+  }
+
+  // ── 2. Verificar se e um comando de agendamento recorrente ──
+  if (isScheduleCommand(question)) {
+    const result = processCommand(question);
+    if (result.understood) {
+      return result.message;
+    }
+  }
+
+  // ── 3. Verificar se e um pedido de relatorio ─────────────
+  const report = generateOnDemandReport(question);
+  if (report) return report;
+
+  // ── 4. Perguntas sobre avisos/tarefas agendadas ──────────
+  if (/aviso|lembrete|tarefa.*agendad|notificac/.test(q)) {
+    const tasks = listActiveTasks();
+    if (tasks.length === 0) {
+      return "Voce nao tem avisos configurados. Posso configurar para voce! Exemplos:\n\n" +
+        "- \"Me avisa todo sabado o rendimento da semana\"\n" +
+        "- \"Todo dia me mostra o resumo de agendamentos\"\n" +
+        "- \"Me lembra todo dia 1 o faturamento do mes\"";
+    }
+    const lines = tasks.map((t, i) => `${i + 1}. ${formatTaskDescription(t)}`);
+    return `Voce tem **${tasks.length} aviso(s)** ativos:\n\n${lines.join("\n")}\n\nPara cancelar, diga \"cancela o aviso X\".`;
+  }
+
   const stats = getAppStats();
 
   // Faturamento
@@ -567,14 +640,30 @@ export function answerQuestion(question: string): string {
     return `Va ate a secao Backup para exportar todos os seus dados em JSON. E recomendado fazer backup pelo menos 1x por semana. Voce tem ${stats.allAppts.length} agendamentos e ${stats.clients.length} clientes.`;
   }
 
+  // Rendimento semanal / da semana (atalho comum)
+  if ((q.includes("rendimento") || q.includes("ganho") || q.includes("lucro")) && q.includes("semana")) {
+    if (q.includes("liquid") || q.includes("lucro")) {
+      return generateReport("rendimento_liquido", "semana");
+    }
+    return generateReport("rendimento_bruto", "semana");
+  }
+
   // Ajuda geral
   if (q.includes("ajuda") || q.includes("como") || q.includes("o que voce faz") || q.includes("funcionalidades")) {
     return "Eu sou o assistente do Dominio Pro! Posso ajudar com:\n\n" +
-      "- Informacoes: \"quanto faturei hoje?\", \"quantos clientes tenho?\"\n" +
-      "- Dicas de uso do app baseadas no seu comportamento\n" +
-      "- Sugestoes de melhorias para seu salao\n" +
-      "- Navegar ate funcionalidades especificas\n\n" +
-      "Experimente me perguntar sobre faturamento, agendamentos, clientes ou funcionarios!";
+      "- **Informacoes**: \"quanto faturei hoje?\", \"quantos clientes tenho?\"\n" +
+      "- **Relatorios**: \"resumo da semana\", \"rendimento liquido do mes\"\n" +
+      "- **Avisos automaticos**: \"me avisa todo sabado o rendimento da semana\"\n" +
+      "- **Lembretes**: \"me lembra toda segunda de abrir o caixa\"\n" +
+      "- **Gerenciar agenda**: \"troque os agendamentos de Ana de segunda para sabado\"\n" +
+      "- **Cancelar**: \"cancela os agendamentos de amanha\"\n" +
+      "- **Dicas** de uso do app baseadas no seu comportamento\n" +
+      "- **Sugestoes** de melhorias para seu salao\n" +
+      "- **Navegar** ate funcionalidades especificas\n\n" +
+      "Experimente:\n" +
+      "- \"Troque os agendamentos de Ana Maria de segunda para sabado dia 2\"\n" +
+      "- \"Me avisa todo sabado o rendimento da semana\"\n" +
+      "- \"Resumo completo do mes\"";
   }
 
   // Como usar X
@@ -614,9 +703,51 @@ export function getWelcomeMessage(): AgentMessage {
   return {
     id: genId("welcome"),
     role: "agent",
-    content: `${greeting}! Sou o assistente inteligente do Dominio Pro. Estou observando como voce usa o app para sugerir melhorias e facilitar sua gestao.\n\nVoce pode me perguntar sobre faturamento, agendamentos, clientes, ou pedir dicas de uso. Tambem vou enviar sugestoes proativas baseadas no seu uso do ${salonName}.`,
+    content: `${greeting}! Sou o assistente inteligente do Dominio Pro. Estou observando como voce usa o app para sugerir melhorias e facilitar sua gestao.\n\nVoce pode me perguntar sobre faturamento, agendamentos, clientes, ou pedir dicas de uso. Tambem vou enviar sugestoes proativas baseadas no seu uso do ${salonName}.\n\n**Novidades!** Agora voce pode me dar ordens como:\n- "Troque os agendamentos de Ana de segunda para sabado dia 5"\n- "Cancela os agendamentos de amanha"\n- "Me avisa todo sabado o rendimento da semana"\n- "Resumo completo do mes"`,
     timestamp: Date.now(),
   };
+}
+
+// ─── Processador de tarefas agendadas ──────────────────────
+
+/**
+ * Verifica e processa tarefas agendadas que devem disparar.
+ * Retorna mensagens do agente para cada tarefa disparada.
+ * Deve ser chamado periodicamente pelo AgentChat.
+ */
+export function processScheduledTasks(): AgentMessage[] {
+  const dueTasks = checkDueTasks();
+  const messages: AgentMessage[] = [];
+
+  for (const task of dueTasks) {
+    const reportContent = generateReport(task.reportType, task.periodScope);
+    const content = `**Aviso agendado: ${task.label}**\n\n${reportContent}`;
+
+    // Salvar como notificacao
+    addNotification(task.id, task.label, reportContent);
+
+    // Enviar notificacao do navegador
+    sendBrowserNotification(
+      `Dominio Pro — ${task.label}`,
+      reportContent.replace(/\*\*/g, "").substring(0, 120)
+    );
+
+    messages.push({
+      id: genId("scheduled"),
+      role: "agent",
+      content,
+      timestamp: Date.now(),
+    });
+  }
+
+  return messages;
+}
+
+/**
+ * Retorna o numero de notificacoes nao lidas.
+ */
+export function getUnreadCount(): number {
+  return getUnreadNotifications().length;
 }
 
 // ─── Mensagem proativa ─────────────────────────────────────
