@@ -8,6 +8,8 @@ import { useLocation } from "wouter";
 import {
   MessageCircle, X, Send, Sparkles, ArrowRight,
   ChevronDown, Lightbulb, AlertTriangle, TrendingUp, Zap, Brain,
+  Mic, MicOff, Volume2, VolumeX, ThumbsUp, ThumbsDown, Settings,
+  HelpCircle, SkipForward,
 } from "lucide-react";
 import { trackPageVisit, trackAction, initTracker } from "@/lib/agentTracker";
 import {
@@ -18,9 +20,31 @@ import {
   getSavedMessages,
   saveMessages,
   dismissSuggestion,
+  processScheduledTasks,
+  getUnreadCount,
   type AgentMessage,
   type AgentSuggestion,
 } from "@/lib/agentBrain";
+import {
+  requestBrowserNotificationPermission,
+  listActiveTasks,
+  getRecentNotifications,
+  markAllNotificationsRead,
+} from "@/lib/agentScheduler";
+import {
+  getPreferences,
+  updatePreferences,
+  addFeedback,
+  trackQuestion,
+  getContextualActions,
+  getOnboardingStep,
+  advanceOnboarding,
+  skipOnboarding,
+  speakText,
+  stopSpeaking,
+  type ContextualAction,
+  type OnboardingStep,
+} from "@/lib/agentLearning";
 
 // ─── Helpers ───────────────────────────────────────────────
 
@@ -63,16 +87,27 @@ export default function AgentChat() {
   const [isTyping, setIsTyping] = useState(false);
   const [hasNewMessage, setHasNewMessage] = useState(false);
   const [initialized, setInitialized] = useState(false);
+  const [showNotifPanel, setShowNotifPanel] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+  // Voz e interatividade
+  const [isListening, setIsListening] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [ttsEnabled, setTtsEnabled] = useState(false);
+  const [onboardingStep, setOnboardingStepState] = useState<OnboardingStep | null>(null);
+  const [contextActions, setContextActions] = useState<ContextualAction[]>([]);
+  const [feedbackGiven, setFeedbackGiven] = useState<Set<string>>(new Set());
   const [, setLocation] = useLocation();
   const [location] = useLocation();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<any>(null);
   const accent = getAccent();
 
   // ── Inicializar tracker e carregar mensagens ────────────
   useEffect(() => {
     if (initialized) return;
     initTracker();
+    requestBrowserNotificationPermission();
 
     const saved = getSavedMessages();
     if (saved.length > 0) {
@@ -82,8 +117,24 @@ export default function AgentChat() {
       setMessages([welcome]);
       saveMessages([welcome]);
     }
+    setUnreadCount(getUnreadCount());
+
+    // Carregar preferencias
+    const prefs = getPreferences();
+    setTtsEnabled(prefs.ttsEnabled);
+
+    // Carregar onboarding
+    const step = getOnboardingStep();
+    setOnboardingStepState(step);
+
     setInitialized(true);
   }, [initialized]);
+
+  // ── Atualizar quick actions contextuais ─────────────────
+  useEffect(() => {
+    if (!initialized) return;
+    setContextActions(getContextualActions(location));
+  }, [location, initialized]);
 
   // ── Rastrear navegacao ──────────────────────────────────
   useEffect(() => {
@@ -139,6 +190,31 @@ export default function AgentChat() {
     };
   }, [initialized, isOpen, messages]);
 
+  // ── Verificar tarefas agendadas periodicamente ───────────
+  useEffect(() => {
+    if (!initialized) return;
+
+    const checkScheduled = () => {
+      const scheduledMessages = processScheduledTasks();
+      if (scheduledMessages.length > 0) {
+        setMessages(prev => {
+          const next = [...prev, ...scheduledMessages];
+          saveMessages(next);
+          return next;
+        });
+        setHasNewMessage(true);
+        setUnreadCount(getUnreadCount());
+      }
+    };
+
+    // Verificar a cada 60 segundos
+    const interval = setInterval(checkScheduled, 60000);
+    // Verificar imediatamente ao inicializar
+    checkScheduled();
+
+    return () => clearInterval(interval);
+  }, [initialized]);
+
   // ── Auto-scroll ─────────────────────────────────────────
   useEffect(() => {
     if (isOpen) {
@@ -159,6 +235,7 @@ export default function AgentChat() {
     if (!text) return;
 
     trackAction("chat", "question", text);
+    trackQuestion(text);
 
     const userMsg: AgentMessage = {
       id: `user_${Date.now()}`,
@@ -187,8 +264,136 @@ export default function AgentChat() {
         return next;
       });
       setIsTyping(false);
+
+      // TTS: falar a resposta
+      if (ttsEnabled) speakText(answer);
     }, 300 + Math.random() * 500);
-  }, [input]);
+  }, [input, ttsEnabled]);
+
+  // ── Voice Input (Speech Recognition) ─────────────────────
+  const toggleVoice = useCallback(() => {
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      return;
+    }
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setMessages(prev => {
+        const msg: AgentMessage = {
+          id: `agent_${Date.now()}`,
+          role: "agent",
+          content: "Seu navegador nao suporta reconhecimento de voz. Tente usar o Google Chrome.",
+          timestamp: Date.now(),
+        };
+        const next = [...prev, msg];
+        saveMessages(next);
+        return next;
+      });
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "pt-BR";
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => setIsListening(true);
+
+    recognition.onresult = (event: any) => {
+      const last = event.results.length - 1;
+      const transcript = event.results[last][0].transcript;
+      setInput(transcript);
+
+      // Se e resultado final, enviar automaticamente
+      if (event.results[last].isFinal) {
+        setIsListening(false);
+        setTimeout(() => {
+          const text = transcript.trim();
+          if (!text) return;
+          trackAction("chat", "voice_question", text);
+          trackQuestion(text);
+
+          const userMsg: AgentMessage = {
+            id: `user_${Date.now()}`,
+            role: "user",
+            content: text,
+            timestamp: Date.now(),
+          };
+          setMessages(prev => [...prev, userMsg]);
+          setInput("");
+          setIsTyping(true);
+
+          setTimeout(() => {
+            const answer = answerQuestion(text);
+            const agentMsg: AgentMessage = {
+              id: `agent_${Date.now()}`,
+              role: "agent",
+              content: answer,
+              timestamp: Date.now(),
+            };
+            setMessages(prev => {
+              const next = [...prev, agentMsg];
+              saveMessages(next);
+              return next;
+            });
+            setIsTyping(false);
+            if (ttsEnabled) speakText(answer);
+          }, 300 + Math.random() * 500);
+        }, 200);
+      }
+    };
+
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => setIsListening(false);
+
+    recognitionRef.current = recognition;
+    recognition.start();
+  }, [isListening, ttsEnabled]);
+
+  // ── Feedback ─────────────────────────────────────────────
+  const handleFeedback = useCallback((msgId: string, rating: "positive" | "negative") => {
+    const msgIndex = messages.findIndex(m => m.id === msgId);
+    const prevUserMsg = messages.slice(0, msgIndex).reverse().find(m => m.role === "user");
+    addFeedback(msgId, rating, prevUserMsg?.content ?? "");
+    setFeedbackGiven(prev => new Set(prev).add(msgId));
+    trackAction("feedback", rating, msgId);
+  }, [messages]);
+
+  // ── Onboarding ───────────────────────────────────────────
+  const handleOnboardingNext = useCallback(() => {
+    const step = onboardingStep;
+    if (step?.action) {
+      setInput(step.action);
+      setTimeout(() => {
+        const text = step.action!;
+        trackAction("chat", "onboarding", text);
+        const userMsg: AgentMessage = {
+          id: `user_${Date.now()}`, role: "user", content: text, timestamp: Date.now(),
+        };
+        setMessages(prev => [...prev, userMsg]);
+        setInput("");
+        setIsTyping(true);
+        setTimeout(() => {
+          const answer = answerQuestion(text);
+          const agentMsg: AgentMessage = {
+            id: `agent_${Date.now()}`, role: "agent", content: answer, timestamp: Date.now(),
+          };
+          setMessages(prev => { const next = [...prev, agentMsg]; saveMessages(next); return next; });
+          setIsTyping(false);
+        }, 400);
+      }, 100);
+    }
+    const next = advanceOnboarding();
+    setOnboardingStepState(next);
+  }, [onboardingStep]);
+
+  const handleSkipOnboarding = useCallback(() => {
+    skipOnboarding();
+    setOnboardingStepState(null);
+  }, []);
 
   // ── Acao de sugestao ────────────────────────────────────
   const handleSuggestionAction = useCallback((suggestion: AgentSuggestion) => {
@@ -239,7 +444,19 @@ export default function AgentChat() {
   const toggleChat = useCallback(() => {
     setIsOpen(prev => !prev);
     setHasNewMessage(false);
+    markAllNotificationsRead();
+    setUnreadCount(0);
+    setShowSettings(false);
+    stopSpeaking();
   }, []);
+
+  // ── Toggle TTS ─────────────────────────────────────────
+  const toggleTts = useCallback(() => {
+    const newVal = !ttsEnabled;
+    setTtsEnabled(newVal);
+    updatePreferences({ ttsEnabled: newVal });
+    if (!newVal) stopSpeaking();
+  }, [ttsEnabled]);
 
   // ── Render ──────────────────────────────────────────────
   return (
@@ -285,6 +502,17 @@ export default function AgentChat() {
               <p className="text-sm font-semibold text-white/90">Assistente IA</p>
               <p className="text-[10px] text-white/40">Observando e aprendendo</p>
             </div>
+            <button
+              onClick={toggleTts}
+              className="p-1.5 rounded-lg transition-colors hover:bg-white/5"
+              title={ttsEnabled ? "Desativar voz" : "Ativar respostas por voz"}
+            >
+              {ttsEnabled ? (
+                <Volume2 className="w-4 h-4" style={{ color: accent }} />
+              ) : (
+                <VolumeX className="w-4 h-4 text-white/30" />
+              )}
+            </button>
             <button
               onClick={handleShowSuggestions}
               className="p-1.5 rounded-lg transition-colors hover:bg-white/5"
@@ -333,6 +561,32 @@ export default function AgentChat() {
                       )}
                     </p>
                   ))}
+
+                  {/* Feedback buttons para respostas do agente */}
+                  {msg.role === "agent" && msg.id !== messages[0]?.id && (
+                    <div className="flex items-center gap-1 mt-2 pt-1.5" style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}>
+                      {feedbackGiven.has(msg.id) ? (
+                        <span className="text-[10px] text-white/30">Obrigado pelo feedback!</span>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => handleFeedback(msg.id, "positive")}
+                            className="p-1 rounded hover:bg-white/10 transition-colors"
+                            title="Resposta util"
+                          >
+                            <ThumbsUp className="w-3 h-3 text-white/25 hover:text-green-400" />
+                          </button>
+                          <button
+                            onClick={() => handleFeedback(msg.id, "negative")}
+                            className="p-1 rounded hover:bg-white/10 transition-colors"
+                            title="Resposta nao ajudou"
+                          >
+                            <ThumbsDown className="w-3 h-3 text-white/25 hover:text-red-400" />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
 
                   {/* Suggestion cards */}
                   {msg.suggestions && msg.suggestions.length > 0 && (
@@ -407,13 +661,51 @@ export default function AgentChat() {
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Quick Actions */}
+          {/* Onboarding Banner */}
+          {onboardingStep && (
+            <div
+              className="mx-3 mb-2 rounded-xl p-3"
+              style={{
+                background: `linear-gradient(135deg, ${accent}20, ${accent}08)`,
+                border: `1px solid ${accent}30`,
+              }}
+            >
+              <div className="flex items-start gap-2">
+                <HelpCircle className="w-4 h-4 mt-0.5 shrink-0" style={{ color: accent }} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-white/90">{onboardingStep.title}</p>
+                  <p className="text-[11px] text-white/50 mt-1">{onboardingStep.message}</p>
+                  <div className="flex gap-2 mt-2">
+                    {onboardingStep.actionLabel && (
+                      <button
+                        onClick={handleOnboardingNext}
+                        className="px-3 py-1 rounded-lg text-[10px] font-semibold text-white transition-all hover:scale-105"
+                        style={{ background: accent }}
+                      >
+                        {onboardingStep.actionLabel}
+                      </button>
+                    )}
+                    <button
+                      onClick={handleSkipOnboarding}
+                      className="px-3 py-1 rounded-lg text-[10px] font-medium text-white/40 hover:text-white/60 transition-colors"
+                    >
+                      Pular tour
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Quick Actions (contextuais) */}
           <div className="px-4 py-2 flex gap-2 overflow-x-auto shrink-0" style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}>
-            {[
-              { label: "Faturamento", q: "quanto faturei este mes?" },
-              { label: "Hoje", q: "como esta minha agenda hoje?" },
-              { label: "Ajuda", q: "o que voce pode fazer?" },
-            ].map(({ label, q }) => (
+            {(contextActions.length > 0 ? contextActions : [
+              { label: "Faturamento", query: "quanto faturei este mes?" },
+              { label: "Hoje", query: "como esta minha agenda hoje?" },
+              { label: "Resumo Semana", query: "resumo da semana" },
+              { label: "Meus Avisos", query: "quais avisos tenho?" },
+              { label: "Ajuda", query: "o que voce pode fazer?" },
+            ]).map(({ label, query: q }) => (
               <button
                 key={label}
                 onClick={() => {
@@ -464,10 +756,27 @@ export default function AgentChat() {
             <div
               className="flex items-center gap-2 rounded-xl px-3 py-2"
               style={{
-                background: "rgba(255,255,255,0.06)",
-                border: "1px solid rgba(255,255,255,0.1)",
+                background: isListening ? `${accent}15` : "rgba(255,255,255,0.06)",
+                border: `1px solid ${isListening ? `${accent}40` : "rgba(255,255,255,0.1)"}`,
+                transition: "all 0.3s ease",
               }}
             >
+              {/* Botao de microfone */}
+              <button
+                onClick={toggleVoice}
+                className={`p-1.5 rounded-lg transition-all ${isListening ? "animate-pulse" : ""}`}
+                style={{
+                  background: isListening ? `${accent}30` : "transparent",
+                }}
+                title={isListening ? "Parar de ouvir" : "Falar por voz"}
+              >
+                {isListening ? (
+                  <Mic className="w-4 h-4" style={{ color: accent }} />
+                ) : (
+                  <Mic className="w-4 h-4 text-white/30 hover:text-white/60" />
+                )}
+              </button>
+
               <input
                 ref={inputRef}
                 value={input}
@@ -478,7 +787,7 @@ export default function AgentChat() {
                     handleSend();
                   }
                 }}
-                placeholder="Pergunte algo..."
+                placeholder={isListening ? "Ouvindo..." : "Pergunte ou fale algo..."}
                 className="flex-1 bg-transparent text-sm text-white/90 placeholder:text-white/25 outline-none"
               />
               <button
@@ -492,6 +801,11 @@ export default function AgentChat() {
                 <Send className="w-3.5 h-3.5 text-white" />
               </button>
             </div>
+            {isListening && (
+              <p className="text-[10px] text-center mt-1" style={{ color: accent }}>
+                Fale agora... o texto aparecera acima
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -524,12 +838,21 @@ export default function AgentChat() {
           <>
             <MessageCircle className="w-5.5 h-5.5 text-white" />
             {/* Notification badge */}
-            {hasNewMessage && (
+            {(hasNewMessage || unreadCount > 0) && (
               <div
-                className="absolute -top-1 -right-1 w-4 h-4 rounded-full flex items-center justify-center animate-pulse-ring"
-                style={{ background: "#ef4444" }}
+                className="absolute -top-1 -right-1 rounded-full flex items-center justify-center animate-pulse-ring"
+                style={{
+                  background: "#ef4444",
+                  minWidth: unreadCount > 0 ? 18 : 16,
+                  height: unreadCount > 0 ? 18 : 16,
+                  padding: unreadCount > 0 ? "0 4px" : 0,
+                }}
               >
-                <div className="w-2 h-2 rounded-full bg-white" />
+                {unreadCount > 0 ? (
+                  <span className="text-[9px] font-bold text-white">{unreadCount > 9 ? "9+" : unreadCount}</span>
+                ) : (
+                  <div className="w-2 h-2 rounded-full bg-white" />
+                )}
               </div>
             )}
           </>
