@@ -15,6 +15,7 @@ import { trackPageVisit, trackAction, initTracker } from "@/lib/agentTracker";
 import {
   generateSuggestions,
   answerQuestion,
+  answerQuestionAsync,
   getWelcomeMessage,
   getProactiveSuggestion,
   getSavedMessages,
@@ -22,8 +23,11 @@ import {
   dismissSuggestion,
   processScheduledTasks,
   getUnreadCount,
+  getDynamicQuickActions,
+  updateAgentPage,
   type AgentMessage,
   type AgentSuggestion,
+  type DynamicQuickAction,
 } from "@/lib/agentBrain";
 import {
   requestBrowserNotificationPermission,
@@ -134,6 +138,7 @@ export default function AgentChat() {
   useEffect(() => {
     if (!initialized) return;
     setContextActions(getContextualActions(location));
+    updateAgentPage(location);
   }, [location, initialized]);
 
   // ── Rastrear navegacao ──────────────────────────────────
@@ -229,12 +234,9 @@ export default function AgentChat() {
     }
   }, [isOpen]);
 
-  // ── Enviar mensagem ─────────────────────────────────────
-  const handleSend = useCallback(() => {
-    const text = input.trim();
-    if (!text) return;
-
-    trackAction("chat", "question", text);
+  // ── Processar resposta do agente (async com orquestrador) ─
+  const processAgentResponse = useCallback(async (text: string, source: string = "question") => {
+    trackAction("chat", source, text);
     trackQuestion(text);
 
     const userMsg: AgentMessage = {
@@ -248,13 +250,12 @@ export default function AgentChat() {
     setInput("");
     setIsTyping(true);
 
-    // Simula tempo de "pensamento" (300-800ms)
-    setTimeout(() => {
-      const answer = answerQuestion(text);
+    try {
+      const result = await answerQuestionAsync(text);
       const agentMsg: AgentMessage = {
         id: `agent_${Date.now()}`,
         role: "agent",
-        content: answer,
+        content: result.message,
         timestamp: Date.now(),
       };
 
@@ -265,10 +266,38 @@ export default function AgentChat() {
       });
       setIsTyping(false);
 
+      // Navegar se tool indicou
+      if (result.navigateTo) {
+        setTimeout(() => setLocation(result.navigateTo!), 600);
+      }
+
       // TTS: falar a resposta
+      if (ttsEnabled) speakText(result.message);
+    } catch {
+      // Fallback para resposta síncrona
+      const answer = answerQuestion(text);
+      const agentMsg: AgentMessage = {
+        id: `agent_${Date.now()}`,
+        role: "agent",
+        content: answer,
+        timestamp: Date.now(),
+      };
+      setMessages(prev => {
+        const next = [...prev, agentMsg];
+        saveMessages(next);
+        return next;
+      });
+      setIsTyping(false);
       if (ttsEnabled) speakText(answer);
-    }, 300 + Math.random() * 500);
-  }, [input, ttsEnabled]);
+    }
+  }, [ttsEnabled, setLocation]);
+
+  // ── Enviar mensagem ─────────────────────────────────────
+  const handleSend = useCallback(() => {
+    const text = input.trim();
+    if (!text) return;
+    processAgentResponse(text, "question");
+  }, [input, processAgentResponse]);
 
   // ── Voice Input (Speech Recognition) ─────────────────────
   const toggleVoice = useCallback(() => {
@@ -313,35 +342,7 @@ export default function AgentChat() {
         setTimeout(() => {
           const text = transcript.trim();
           if (!text) return;
-          trackAction("chat", "voice_question", text);
-          trackQuestion(text);
-
-          const userMsg: AgentMessage = {
-            id: `user_${Date.now()}`,
-            role: "user",
-            content: text,
-            timestamp: Date.now(),
-          };
-          setMessages(prev => [...prev, userMsg]);
-          setInput("");
-          setIsTyping(true);
-
-          setTimeout(() => {
-            const answer = answerQuestion(text);
-            const agentMsg: AgentMessage = {
-              id: `agent_${Date.now()}`,
-              role: "agent",
-              content: answer,
-              timestamp: Date.now(),
-            };
-            setMessages(prev => {
-              const next = [...prev, agentMsg];
-              saveMessages(next);
-              return next;
-            });
-            setIsTyping(false);
-            if (ttsEnabled) speakText(answer);
-          }, 300 + Math.random() * 500);
+          processAgentResponse(text, "voice_question");
         }, 200);
       }
     };
@@ -368,27 +369,12 @@ export default function AgentChat() {
     if (step?.action) {
       setInput(step.action);
       setTimeout(() => {
-        const text = step.action!;
-        trackAction("chat", "onboarding", text);
-        const userMsg: AgentMessage = {
-          id: `user_${Date.now()}`, role: "user", content: text, timestamp: Date.now(),
-        };
-        setMessages(prev => [...prev, userMsg]);
-        setInput("");
-        setIsTyping(true);
-        setTimeout(() => {
-          const answer = answerQuestion(text);
-          const agentMsg: AgentMessage = {
-            id: `agent_${Date.now()}`, role: "agent", content: answer, timestamp: Date.now(),
-          };
-          setMessages(prev => { const next = [...prev, agentMsg]; saveMessages(next); return next; });
-          setIsTyping(false);
-        }, 400);
+        processAgentResponse(step.action!, "onboarding");
       }, 100);
     }
     const next = advanceOnboarding();
     setOnboardingStepState(next);
-  }, [onboardingStep]);
+  }, [onboardingStep, processAgentResponse]);
 
   const handleSkipOnboarding = useCallback(() => {
     skipOnboarding();
@@ -499,8 +485,8 @@ export default function AgentChat() {
               <Brain className="w-4.5 h-4.5" style={{ color: accent }} />
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-white/90">Assistente IA</p>
-              <p className="text-[10px] text-white/40">Observando e aprendendo</p>
+              <p className="text-sm font-semibold text-white/90">Super Agente</p>
+              <p className="text-[10px] text-white/40">Gerenciando seu salao</p>
             </div>
             <button
               onClick={toggleTts}
