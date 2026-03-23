@@ -24,6 +24,8 @@ import {
 import { calcPeriodStats, getAppointmentsInPeriod, getPeriodDates } from "./analytics";
 import { isScheduleCommand, processCommand } from "./agentCommands";
 import { generateOnDemandReport } from "./agentReports";
+import { processMessage, getDynamicQuickActions, PHRASE_TEMPLATES, type OrchestratorResult, type DynamicQuickAction } from "./agentOrchestrator";
+import { setCurrentPage as setContextPage } from "./agentContext";
 import {
   isAgendaActionCommand,
   parseAgendaAction,
@@ -521,6 +523,24 @@ export function generateSuggestions(): AgentSuggestion[] {
 
 // ─── Respostas do Agente a perguntas ───────────────────────
 
+/**
+ * Versao async que usa o orquestrador do Super Agente.
+ * Tenta resolver pelo pipeline de tools primeiro; se nao tratar,
+ * cai no fallback da logica existente (answerQuestion).
+ */
+export async function answerQuestionAsync(question: string): Promise<{ message: string; navigateTo?: string }> {
+  try {
+    const result = await processMessage(question);
+    if (result.handled) {
+      return { message: result.message, navigateTo: result.navigateTo };
+    }
+  } catch {
+    // Se o orquestrador falhar, cai no fallback
+  }
+  // Fallback: logica existente
+  return { message: answerQuestion(question) };
+}
+
 export function answerQuestion(question: string): string {
   const q = question.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
@@ -708,7 +728,7 @@ export function getWelcomeMessage(): AgentMessage {
   return {
     id: genId("welcome"),
     role: "agent",
-    content: `${greeting}! Sou o assistente inteligente do Dominio Pro. Estou observando como voce usa o app para sugerir melhorias e facilitar sua gestao.\n\nVoce pode me perguntar sobre faturamento, agendamentos, clientes, ou pedir dicas de uso. Tambem vou enviar sugestoes proativas baseadas no seu uso do ${salonName}.\n\n**Novidades!** Agora voce pode me dar ordens como:\n- "Troque os agendamentos de Ana de segunda para sabado dia 5"\n- "Cancela os agendamentos de amanha"\n- "Me avisa todo sabado o rendimento da semana"\n- "Resumo completo do mes"`,
+    content: `${greeting}! Sou o **Super Agente** do Dominio Pro. Gerencio seu salao inteiro por aqui!\n\nPosso fazer tudo pelo chat:\n\n**Clientes:** cadastrar, editar, excluir, buscar, ver historico, listar inativos e aniversariantes\n**Funcionarios:** cadastrar, editar, listar equipe e comissoes\n**Servicos:** cadastrar, editar, ver catalogo e mais populares\n**Caixa:** abrir, fechar, registrar pagamentos, consultar saldo\n**Navegacao:** "ir para agenda", "abrir relatorios"\n**Relatorios:** faturamento, resumo do dia/semana/mes\n**Avisos:** "me avisa todo sabado o rendimento"\n**Agenda:** criar, mover e cancelar agendamentos\n\nExemplos:\n- "Cadastrar cliente Maria Silva com telefone 11999887766"\n- "Abrir caixa com saldo inicial 200"\n- "Historico do cliente Joao"\n- "Listar servicos"\n- "Fechar caixa"\n\nDigite o que precisa e eu resolvo!`,
     timestamp: Date.now(),
   };
 }
@@ -776,6 +796,16 @@ export function getProactiveSuggestion(): AgentMessage | null {
 // ─── Descarte de sugestao ──────────────────────────────────
 
 export { dismissSuggestion };
+
+// ─── Quick Actions e Templates (Super Agente) ─────────────
+
+export { getDynamicQuickActions, PHRASE_TEMPLATES };
+export type { DynamicQuickAction };
+
+/** Atualiza a pagina atual no contexto do agente */
+export function updateAgentPage(page: string): void {
+  setContextPage(page);
+}
 
 // ─── Labels ────────────────────────────────────────────────
 
