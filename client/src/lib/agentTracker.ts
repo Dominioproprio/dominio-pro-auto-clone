@@ -231,6 +231,28 @@ export function getUnusedFeatures(): string[] {
   return allFeatures.filter(f => !featureUsage[f] || featureUsage[f] < 2);
 }
 
+// ─── Tracking de comandos e tarefas agendadas ─────────────
+
+/** Registra uso de comando (agendamento, cancelamento, listagem) */
+export function trackCommand(commandType: string, details?: string): void {
+  trackAction("command", commandType, details);
+}
+
+/** Registra disparo de tarefa agendada */
+export function trackScheduledTaskFired(taskId: string, taskLabel: string): void {
+  trackAction("scheduled_task_fired", taskId, taskLabel);
+}
+
+/** Registra interacao com notificacao */
+export function trackNotificationInteraction(notifId: string, action: string): void {
+  trackAction("notification", action, notifId);
+}
+
+/** Registra pedido de relatorio sob demanda */
+export function trackReportRequest(reportType: string, scope: string): void {
+  trackAction("report_request", reportType, scope);
+}
+
 /** Pagina atual */
 export function getCurrentPage(): string {
   return currentPage;
