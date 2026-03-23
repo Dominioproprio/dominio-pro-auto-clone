@@ -10,6 +10,11 @@
  * - "Cancela os agendamentos de amanha"
  * - "Reagenda o horario das 14h de hoje para amanha as 15h"
  * - "Move os agendamentos do Joao de hoje para sexta"
+ *
+ * Ordem de prioridade no parseAgendaAction:
+ *   1. cancel_appointments  (cancelar/desmarcar)
+ *   2. change_employee      (trocar funcionario/profissional)
+ *   3. move_appointments    (mover/transferir/reagendar — regex mais ampla, fica por ultimo)
  */
 
 import {
@@ -71,28 +76,34 @@ export interface ActionResult {
 
 const PENDING_ACTIONS_KEY = "dominio_agent_pending_actions";
 
-let idCounter = 0;
+/** Tempo maximo (em ms) para uma acao pendente ser confirmada — 30 minutos */
+const MAX_ACTION_AGE_MS = 30 * 60 * 1000;
+
 function genActionId(): string {
-  return `action_${Date.now()}_${++idCounter}`;
+  return `action_${Date.now()}_${crypto.randomUUID()}`;
 }
 
 function savePendingActions(actions: PendingAction[]): void {
   try {
     localStorage.setItem(PENDING_ACTIONS_KEY, JSON.stringify(actions.slice(-20)));
-  } catch { /* ignore */ }
+  } catch (err) {
+    console.error("[agentActions] Falha ao salvar acoes pendentes:", err);
+  }
 }
 
 function loadPendingActions(): PendingAction[] {
   try {
     const raw = localStorage.getItem(PENDING_ACTIONS_KEY);
     return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
+  } catch (err) {
+    console.error("[agentActions] Falha ao carregar acoes pendentes:", err);
+    return [];
+  }
 }
 
 // ─── Helpers de data ───────────────────────────────────────
 
 const DAY_NAMES_PT = ["domingo", "segunda", "terca", "quarta", "quinta", "sexta", "sabado"];
-const DAY_NAMES_FULL = ["domingo", "segunda-feira", "terca-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sabado"];
 
 function normalize(text: string): string {
   return text
@@ -102,6 +113,34 @@ function normalize(text: string): string {
     .replace(/[?!.,;:]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * Converte Date para string YYYY-MM-DD usando horario LOCAL (nao UTC).
+ * Evita o bug onde 22h em UTC-3 viraria o dia seguinte com toISOString().
+ */
+function toDateStr(d: Date): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Extrai a parte YYYY-MM-DD de um ISO datetime usando horario LOCAL.
+ */
+function toLocalDateStr(isoString: string): string {
+  const d = new Date(isoString);
+  return toDateStr(d);
+}
+
+/**
+ * Verifica se o texto normalizado contem um dia da semana como palavra inteira,
+ * evitando falsos positivos (ex: nome "Domingos" contendo "domingo").
+ */
+function containsDayOfWeek(q: string, dayName: string): boolean {
+  const regex = new RegExp(`\\b${dayName}\\b`);
+  return regex.test(q);
 }
 
 function parseDateFromText(q: string, context: "source" | "target"): { date: string | null; dayOfWeek: number | null } {
@@ -124,7 +163,7 @@ function parseDateFromText(q: string, context: "source" | "target"): { date: str
   if (dayMonthMatch) {
     const day = parseInt(dayMonthMatch[1], 10);
     let month = now.getMonth();
-    let year = now.getFullYear();
+    const year = now.getFullYear();
 
     if (dayMonthMatch[2]) {
       const monthStr = dayMonthMatch[2];
@@ -147,10 +186,9 @@ function parseDateFromText(q: string, context: "source" | "target"): { date: str
     return { date: toDateStr(target), dayOfWeek: null };
   }
 
-  // Dia da semana: "segunda", "sabado", etc.
+  // Dia da semana: "segunda", "sabado", etc. — com word boundary
   for (let i = 0; i < DAY_NAMES_PT.length; i++) {
-    if (q.includes(DAY_NAMES_PT[i])) {
-      // Calcula proxima ocorrencia desse dia
+    if (containsDayOfWeek(q, DAY_NAMES_PT[i])) {
       const targetDay = i;
       const currentDay = now.getDay();
       let daysUntil = targetDay - currentDay;
@@ -169,58 +207,50 @@ function parseDateFromText(q: string, context: "source" | "target"): { date: str
   return { date: null, dayOfWeek: null };
 }
 
-function toDateStr(d: Date): string {
-  return d.toISOString().split("T")[0];
-}
-
 function formatDatePT(dateStr: string): string {
   const d = new Date(dateStr + "T12:00:00");
   return d.toLocaleDateString("pt-BR", { weekday: "long", day: "numeric", month: "long" });
 }
 
-// ─── Busca de clientes/funcionarios por nome ───────────────
+// ─── Busca generica por nome ───────────────────────────────
 
-function findClientByName(name: string): { id: number; name: string } | null {
-  const clients = clientsStore.list();
+/**
+ * Busca generica por nome em uma lista de entidades.
+ * Tenta: match exato → match parcial → match por partes do nome.
+ */
+function findByName<T extends { id: number; name: string }>(
+  items: T[],
+  name: string,
+): { id: number; name: string } | null {
   const norm = normalize(name);
 
   // Busca exata
-  let found = clients.find(c => normalize(c.name) === norm);
+  let found = items.find(item => normalize(item.name) === norm);
   if (found) return { id: found.id, name: found.name };
 
   // Busca parcial
-  found = clients.find(c => normalize(c.name).includes(norm));
+  found = items.find(item => normalize(item.name).includes(norm));
   if (found) return { id: found.id, name: found.name };
 
   // Busca por partes do nome
   const nameParts = norm.split(" ").filter(p => p.length > 2);
-  found = clients.find(c => {
-    const cNorm = normalize(c.name);
-    return nameParts.every(p => cNorm.includes(p));
-  });
-  if (found) return { id: found.id, name: found.name };
+  if (nameParts.length > 0) {
+    found = items.find(item => {
+      const itemNorm = normalize(item.name);
+      return nameParts.every(p => itemNorm.includes(p));
+    });
+    if (found) return { id: found.id, name: found.name };
+  }
 
   return null;
 }
 
+function findClientByName(name: string): { id: number; name: string } | null {
+  return findByName(clientsStore.list(), name);
+}
+
 function findEmployeeByName(name: string): { id: number; name: string } | null {
-  const employees = employeesStore.list(false);
-  const norm = normalize(name);
-
-  let found = employees.find(e => normalize(e.name) === norm);
-  if (found) return { id: found.id, name: found.name };
-
-  found = employees.find(e => normalize(e.name).includes(norm));
-  if (found) return { id: found.id, name: found.name };
-
-  const nameParts = norm.split(" ").filter(p => p.length > 2);
-  found = employees.find(e => {
-    const eNorm = normalize(e.name);
-    return nameParts.every(p => eNorm.includes(p));
-  });
-  if (found) return { id: found.id, name: found.name };
-
-  return null;
+  return findByName(employeesStore.list(false), name);
 }
 
 // ─── Deteccao de intencao de acao na agenda ────────────────
@@ -232,19 +262,27 @@ export function isAgendaActionCommand(text: string): boolean {
     /mov[ae]\s+.*agendamento/,
     /transfer[ei]\s+.*agendamento/,
     /reagend[ae]/,
+    /remarqu?e?\s+.*agendamento/,
+    /adi[ae]\s+.*agendamento/,
+    /antecip[ae]\s+.*agendamento/,
     /mude?\s+.*agendamento/,
     /pass[ae]\s+.*agendamento/,
     /cancel[ae]\s+.*agendamento/,
     /desmarqu?e?\s+.*agendamento/,
     /troqu?e?\s+.*horario/,
     /mov[ae]\s+.*horario/,
+    /mude?\s+.*horario/,
     /transfer[ei]\s+.*horario/,
+    /antecip[ae]\s+.*horario/,
+    /adi[ae]\s+.*horario/,
     /agendamento.*para\s+(segunda|terca|quarta|quinta|sexta|sabado|domingo|amanha|dia\s+\d)/,
     /troque?\s+.*d[aoe]\s+\w+.*para\s+(segunda|terca|quarta|quinta|sexta|sabado|domingo|amanha|dia\s+\d)/,
     /mov[ae]\s+.*d[aoe]\s+\w+.*para/,
     /transfer[ei]\s+.*d[aoe]\s+\w+.*para/,
     /troqu?e?\s+o\s+funcionario/,
     /mude?\s+o\s+profissional/,
+    /troqu?e?\s+o\s+profissional/,
+    /mude?\s+o\s+funcionario/,
   ];
   return patterns.some(p => p.test(q));
 }
@@ -254,7 +292,7 @@ export function isAgendaActionCommand(text: string): boolean {
 export function parseAgendaAction(text: string): ActionParams | null {
   const q = normalize(text);
 
-  // ── Cancelar agendamentos ──
+  // ── 1. Cancelar agendamentos (prioridade mais alta) ──
   if (/cancel[ae]|desmarqu?e?/.test(q)) {
     const clientName = extractClientName(q);
     const { date: sourceDate } = parseDateFromText(q, "source");
@@ -266,8 +304,8 @@ export function parseAgendaAction(text: string): ActionParams | null {
     };
   }
 
-  // ── Trocar funcionario ──
-  if (/troqu?e?\s+o\s+(funcionario|profissional)/.test(q)) {
+  // ── 2. Trocar funcionario ──
+  if (/troqu?e?\s+o\s+(funcionario|profissional)|mude?\s+o\s+(funcionario|profissional)/.test(q)) {
     const names = extractTwoNames(q);
     const { date: sourceDate } = parseDateFromText(q, "source");
 
@@ -279,8 +317,8 @@ export function parseAgendaAction(text: string): ActionParams | null {
     };
   }
 
-  // ── Mover/transferir/trocar agendamentos ──
-  if (/troqu?e?|mov[ae]|transfer[ei]|reagend[ae]|pass[ae]|mude?/.test(q)) {
+  // ── 3. Mover/transferir/trocar agendamentos (regex mais ampla, fica por ultimo) ──
+  if (/troqu?e?|mov[ae]|transfer[ei]|reagend[ae]|remarqu?e?|pass[ae]|mude?|adi[ae]|antecip[ae]/.test(q)) {
     const clientName = extractClientName(q);
     const employeeName = extractEmployeeName(q);
 
@@ -310,13 +348,14 @@ export function parseAgendaAction(text: string): ActionParams | null {
       }
     }
 
-    // Extrair horario alvo
-    const timeMatch = q.match(/(?:as?\s+)?(\d{1,2}):(\d{2})|(?:as?\s+)?(\d{1,2})\s*h\s*(\d{2})?/);
+    // Extrair horario alvo — exige prefixo "as/a" ou sufixo "h" para evitar
+    // falsos positivos com numeros de dia (ex: "dia 14" nao vira "14:00").
+    const timeMatch = q.match(/(?:as?\s+)(\d{1,2}):(\d{2})|(?:as?\s+)(\d{1,2})\s*h\s*(\d{2})?|(\d{1,2})\s*h\s*(\d{2})/);
     let targetTime: string | undefined;
     if (timeMatch) {
-      const h = parseInt(timeMatch[1] ?? timeMatch[3], 10);
-      const m = parseInt(timeMatch[2] ?? timeMatch[4] ?? "0", 10);
-      if (h >= 0 && h <= 23) {
+      const h = parseInt(timeMatch[1] ?? timeMatch[3] ?? timeMatch[5], 10);
+      const m = parseInt(timeMatch[2] ?? timeMatch[4] ?? timeMatch[6] ?? "0", 10);
+      if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
         targetTime = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
       }
     }
@@ -338,9 +377,10 @@ export function parseAgendaAction(text: string): ActionParams | null {
 
 function extractClientName(q: string): string | null {
   // Padroes: "agendamentos de/da/do [NOME]", "de [NOME] de/da"
+  // O texto ja esta normalizado (sem acentos), entao usamos apenas [a-z\s]
   const patterns = [
-    /agendamentos?\s+d[aoe]\s+([A-Za-z\u00C0-\u024F][\w\s\u00C0-\u024F]+?)(?:\s+(?:de|da|do|para|pro|pra|hoje|amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo))/i,
-    /d[aoe]\s+([A-Za-z\u00C0-\u024F][\w\s\u00C0-\u024F]{2,})(?:\s+(?:de|da|do|para|pro|pra|hoje|amanha))/i,
+    /agendamentos?\s+d[aoe]\s+([a-z][a-z\s]+?)(?:\s+(?:de|da|do|para|pro|pra|hoje|amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo))/,
+    /d[aoe]\s+([a-z][a-z\s]{2,})(?:\s+(?:de|da|do|para|pro|pra|hoje|amanha))/,
   ];
 
   for (const pattern of patterns) {
@@ -353,18 +393,22 @@ function extractClientName(q: string): string | null {
     }
   }
 
-  // Tentar com busca mais ampla — qualquer nome proprio no texto
+  // Tentar com busca mais ampla — qualquer nome de cliente presente no texto
   const clients = clientsStore.list();
   for (const client of clients) {
     const clientNorm = normalize(client.name);
-    const nameParts = clientNorm.split(" ").filter(p => p.length > 2);
-    // Se pelo menos 2 partes do nome aparecem no texto
-    if (nameParts.length >= 2) {
-      const matchCount = nameParts.filter(p => q.includes(p)).length;
-      if (matchCount >= 2) return client.name;
-    }
-    // Se nome completo aparece
+    // Se nome completo aparece no texto
     if (q.includes(clientNorm)) return client.name;
+  }
+
+  // Busca por partes do nome — exige que TODAS as partes (min 2) aparecam
+  for (const client of clients) {
+    const clientNorm = normalize(client.name);
+    const nameParts = clientNorm.split(" ").filter(p => p.length > 2);
+    if (nameParts.length >= 2) {
+      const allPartsMatch = nameParts.every(p => q.includes(p));
+      if (allPartsMatch) return client.name;
+    }
   }
 
   return null;
@@ -372,15 +416,23 @@ function extractClientName(q: string): string | null {
 
 function extractEmployeeName(q: string): string | null {
   const employees = employeesStore.list(false);
+
+  // Match exato do nome completo primeiro
   for (const emp of employees) {
     const empNorm = normalize(emp.name);
     if (q.includes(empNorm)) return emp.name;
+  }
+
+  // Depois match por partes — exige que TODAS as partes aparecam
+  for (const emp of employees) {
+    const empNorm = normalize(emp.name);
     const parts = empNorm.split(" ").filter(p => p.length > 2);
     if (parts.length >= 2) {
-      const matchCount = parts.filter(p => q.includes(p)).length;
-      if (matchCount >= 2) return emp.name;
+      const allPartsMatch = parts.every(p => q.includes(p));
+      if (allPartsMatch) return emp.name;
     }
   }
+
   return null;
 }
 
@@ -392,11 +444,16 @@ function extractTwoNames(q: string): { from: string; to: string } | null {
   return null;
 }
 
+/**
+ * Extrai datas do texto de forma unificada, usando parseDateFromText internamente.
+ * Retorna lista ordenada de datas encontradas (sem duplicatas).
+ */
 function extractDatesFromText(q: string): string[] {
   const dates: string[] = [];
   const now = new Date();
 
   if (q.includes("hoje")) dates.push(toDateStr(now));
+
   if (q.includes("amanha")) {
     const d = new Date(now);
     d.setDate(d.getDate() + 1);
@@ -404,11 +461,19 @@ function extractDatesFromText(q: string): string[] {
   }
 
   for (let i = 0; i < DAY_NAMES_PT.length; i++) {
-    if (q.includes(DAY_NAMES_PT[i])) {
-      const daysUntil = ((i - now.getDay()) + 7) % 7 || 7;
+    if (containsDayOfWeek(q, DAY_NAMES_PT[i])) {
+      const currentDay = now.getDay();
+      let daysUntil = ((i - currentDay) + 7) % 7;
+      // Se e o mesmo dia e ja temos outra data, assume proxima semana
+      if (daysUntil === 0 && dates.length > 0) {
+        daysUntil = 7;
+      }
       const d = new Date(now);
-      d.setDate(d.getDate() + (daysUntil === 7 && dates.length === 0 ? 0 : daysUntil));
-      dates.push(toDateStr(d));
+      d.setDate(d.getDate() + daysUntil);
+      const dateStr = toDateStr(d);
+      if (!dates.includes(dateStr)) {
+        dates.push(dateStr);
+      }
     }
   }
 
@@ -419,7 +484,10 @@ function extractDatesFromText(q: string): string[] {
       if (day >= 1 && day <= 31) {
         const d = new Date(now.getFullYear(), now.getMonth(), day);
         if (d < now) d.setMonth(d.getMonth() + 1);
-        dates.push(toDateStr(d));
+        const dateStr = toDateStr(d);
+        if (!dates.includes(dateStr)) {
+          dates.push(dateStr);
+        }
       }
     }
   }
@@ -455,10 +523,10 @@ export function prepareAction(params: ActionParams): ActionResult {
     }
   }
 
-  // Filtrar por data de origem
+  // Filtrar por data de origem — usando horario LOCAL
   if (params.sourceDate) {
     filtered = filtered.filter(a => {
-      const apptDate = new Date(a.startTime).toISOString().split("T")[0];
+      const apptDate = toLocalDateStr(a.startTime);
       return apptDate === params.sourceDate;
     });
   }
@@ -478,7 +546,9 @@ export function prepareAction(params: ActionParams): ActionResult {
   const affectedAppointments = filtered.map(a => {
     const client = clients.find(c => c.id === a.clientId);
     const emp = employees.find(e => e.id === a.employeeId);
-    const serviceNames = (a.services ?? []).map((s: { name: string }) => s.name).join(", ");
+    const serviceNames = (a.services ?? [])
+      .map((s: { name?: string }) => s.name ?? "Sem nome")
+      .join(", ");
     const apptDate = new Date(a.startTime);
     return {
       id: a.id,
@@ -504,7 +574,12 @@ export function prepareAction(params: ActionParams): ActionResult {
         details += `${i + 1}. ${a.clientName} — ${a.serviceName} (${a.date} ${a.startTime}) com ${a.employeeName}\n`;
       });
       details += `\n**Destino:** ${targetLabel}`;
-      if (params.targetTime) details += ` as ${params.targetTime}`;
+      if (params.targetTime) {
+        details += ` as ${params.targetTime}`;
+        if (affectedAppointments.length > 1) {
+          details += `\n\n⚠️ **Atencao:** O horario ${params.targetTime} sera aplicado apenas ao primeiro agendamento. Os demais serao distribuidos sequencialmente para evitar sobreposicao.`;
+        }
+      }
       break;
     }
 
@@ -573,6 +648,16 @@ export function executeAction(actionId: string): ActionResult {
     return { success: false, message: "Esta acao ja foi processada." };
   }
 
+  // Verificar se a acao expirou
+  if (Date.now() - action.createdAt > MAX_ACTION_AGE_MS) {
+    action.status = "cancelled";
+    savePendingActions(pending);
+    return {
+      success: false,
+      message: "Esta acao expirou (mais de 30 minutos). Por favor, solicite novamente.",
+    };
+  }
+
   const params = action.params;
 
   try {
@@ -582,8 +667,27 @@ export function executeAction(actionId: string): ActionResult {
           return { success: false, message: "Data de destino nao especificada." };
         }
 
+        // Verificar conflitos de horario no destino
+        const allAppts = appointmentsStore.list({});
+        const targetDateAppts = allAppts.filter(a => {
+          if (a.status === "cancelled" || a.status === "no_show") return false;
+          const apptDate = toLocalDateStr(a.startTime);
+          return apptDate === params.targetDate;
+        });
+        const affectedIds = new Set(action.affectedAppointments.map(a => a.id));
+        const existingTargetAppts = targetDateAppts.filter(a => !affectedIds.has(a.id));
+
+        // Ordenar agendamentos afetados por horario original
+        const sortedAffected = [...action.affectedAppointments].sort((a, b) => {
+          const timeA = a.startTime;
+          const timeB = b.startTime;
+          return timeA.localeCompare(timeB);
+        });
+
         let movedCount = 0;
-        for (const affected of action.affectedAppointments) {
+        let nextAvailableTime: Date | null = null;
+
+        for (const affected of sortedAffected) {
           const appt = appointmentsStore.get(affected.id);
           if (!appt) continue;
 
@@ -596,16 +700,43 @@ export function executeAction(actionId: string): ActionResult {
 
           // Se tem horario especifico
           if (params.targetTime) {
-            const [h, m] = params.targetTime.split(":").map(Number);
-            newStart.setHours(h, m, 0, 0);
+            if (movedCount === 0) {
+              // Primeiro agendamento: usa o horario especificado
+              const [h, m] = params.targetTime.split(":").map(Number);
+              newStart.setHours(h, m, 0, 0);
+            } else if (nextAvailableTime) {
+              // Agendamentos subsequentes: distribui sequencialmente
+              newStart.setTime(nextAvailableTime.getTime());
+            }
           }
 
           const newEnd = new Date(newStart.getTime() + duration);
+
+          // Verificar conflito com agendamentos existentes no destino
+          const hasConflict = existingTargetAppts.some(existing => {
+            const existStart = new Date(existing.startTime).getTime();
+            const existEnd = new Date(existing.endTime).getTime();
+            return newStart.getTime() < existEnd && newEnd.getTime() > existStart;
+          });
+
+          if (hasConflict) {
+            // Se ha conflito, nao mover e avisar
+            action.status = "cancelled";
+            savePendingActions(pending);
+            return {
+              success: false,
+              message: `Conflito de horario detectado para ${affected.clientName} no destino (${newStart.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}). Nenhum agendamento foi movido. Escolha outro horario ou data.`,
+            };
+          }
 
           appointmentsStore.update(affected.id, {
             startTime: newStart.toISOString(),
             endTime: newEnd.toISOString(),
           });
+
+          // Preparar proximo horario disponivel
+          nextAvailableTime = newEnd;
+
           movedCount++;
         }
 
@@ -614,7 +745,7 @@ export function executeAction(actionId: string): ActionResult {
 
         return {
           success: true,
-          message: `Pronto! ${movedCount} agendamento(s) movido(s) para ${formatDatePT(params.targetDate)}${params.targetTime ? ` as ${params.targetTime}` : ""}.`,
+          message: `Pronto! ${movedCount} agendamento(s) movido(s) para ${formatDatePT(params.targetDate)}${params.targetTime ? ` a partir das ${params.targetTime}` : ""}.`,
         };
       }
 
@@ -663,6 +794,7 @@ export function executeAction(actionId: string): ActionResult {
         return { success: false, message: "Tipo de acao nao suportado." };
     }
   } catch (err) {
+    console.error("[agentActions] Erro ao executar acao:", err);
     return { success: false, message: `Erro ao executar acao: ${String(err)}` };
   }
 }
@@ -686,7 +818,12 @@ export function cancelPendingAction(actionId: string): ActionResult {
 
 export function getLatestPendingAction(): PendingAction | null {
   const pending = loadPendingActions();
-  const active = pending.filter(a => a.status === "pending_confirmation");
+  const active = pending.filter(a => {
+    if (a.status !== "pending_confirmation") return false;
+    // Ignorar acoes expiradas
+    if (Date.now() - a.createdAt > MAX_ACTION_AGE_MS) return false;
+    return true;
+  });
   return active.length > 0 ? active[active.length - 1] : null;
 }
 
@@ -694,10 +831,10 @@ export function getLatestPendingAction(): PendingAction | null {
 
 export function isConfirmation(text: string): boolean {
   const q = normalize(text);
-  return /^(sim|confirma|confirmo|pode|ok|faz|executa|vai|manda|bora|claro|com certeza|pode sim|sim pode|confirmar)$/.test(q);
+  return /\b(sim|confirma|confirmo|pode|ok|faz|executa|vai|manda|bora|claro|com certeza|pode sim|sim pode|confirmar)\b/.test(q);
 }
 
 export function isDenial(text: string): boolean {
   const q = normalize(text);
-  return /^(nao|cancela|cancelar|nao quero|deixa|para|nao pode|negativo|nao faz)$/.test(q);
+  return /\b(nao|cancela|cancelar|nao quero|deixa|para|nao pode|negativo|nao faz)\b/.test(q);
 }
