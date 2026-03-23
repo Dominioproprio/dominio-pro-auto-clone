@@ -423,27 +423,55 @@ const TIME_PATTERN = /(?:(?:as?\s+)?(\d{1,2}):(\d{2})|(?:as?\s+)?(\d{1,2})\s*h\s
 const DATE_PATTERN = /(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2,4}))?/;
 
 /** Extrai nome próprio de texto (heurística: palavra com inicial maiúscula) */
+// Palavras que NÃO podem ser nomes de clientes — usadas para validar resultado da extração
+const NOT_A_NAME = new Set([
+  "dia", "hoje", "amanha", "semana", "mes", "ano", "manha", "tarde", "noite",
+  "hora", "horas", "minuto", "minutos", "segundo", "segundos",
+  "servico", "servicos", "procedimento", "corte", "escova", "progressiva",
+  "manicure", "pedicure", "tintura", "coloracao", "hidratacao", "alisamento",
+  "agendamento", "agendamentos", "horario", "caixa", "agenda",
+  "funcionario", "profissional", "barbeiro", "cabeleireiro", "cabeleireira",
+  "para", "com", "por", "sobre", "entre",
+]);
+
+function isValidName(name: string): boolean {
+  if (name.length < 2 || name.length > 60) return false;
+  const normalized = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  // Rejeita se começa com número ou só tem números/símbolos
+  if (/^\d/.test(normalized)) return false;
+  // Rejeita se a primeira palavra é uma não-nome conhecida
+  const firstWord = normalized.split(/\s+/)[0];
+  if (NOT_A_NAME.has(firstWord)) return false;
+  return true;
+}
+
 function extractProperName(text: string, q: string): string | null {
   // Tenta extrair nome após preposições comuns
+  // ATENÇÃO: patterns mais específicos (com "cliente X") vêm PRIMEIRO
   const namePatterns = [
-    /(?:agendar?e?|marcar?|reservar)\s+(?:a\s+|o\s+)?(?:cliente\s+)?(.+?)(?:\s+(?:para|hoje|amanha|as\s|no\s|na\s|em\s|$))/i,
-    /(?:quero\s+)?(?:agendar?e?|marcar?)\s+(?:a\s+|o\s+)?(?:cliente\s+)?(.+?)(?:\s+(?:para|hoje|amanha|as\s|no\s|na\s|em\s|$))/i,
+    // Padrão explícito "cliente X" — máxima prioridade
+    /(?:cliente|consumidor|freguesia)\s+(?:chamad[ao]?\s+)?([A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ\s]{1,59})(?:\s+(?:com|de|para|no|na|do|da|e\s|hoje|amanha|as\s|,|$))/i,
+    // Padrão com "do cliente / da cliente"
+    /(?:do|da|de)\s+(?:cliente|funcionario)\s+(.+?)(?:\s+(?:para|com|e\s|$))/i,
+    // Cancelar/mover agendamento de X
     /(?:cancelar|desmarcar)\s+(?:o\s+|a\s+)?(?:agendamento\s+)?(?:do|da|de)\s+(.+?)(?:\s+(?:para|hoje|amanha|as\s|$))/i,
     /(?:mover|reagendar|trocar)\s+(?:o\s+|a\s+)?(?:agendamento\s+)?(?:do|da|de)\s+(.+?)(?:\s+(?:para|$))/i,
-    /(?:cliente|funcionario|profissional|barbeiro|cabeleireira?|manicure)\s+(?:chamad[ao]?\s+)?(.+?)(?:\s+(?:com|de|para|no|na|do|da|e\s|hoje|amanha|as\s|$))/i,
-    /(?:do|da|de)\s+(?:cliente|funcionario)\s+(.+?)(?:\s+(?:para|com|e\s|$))/i,
-    /(?:cadastrar|criar|adicionar|novo|nova|registrar)\s+(?:o\s+|a\s+)?(?:cliente|funcionario|servico)\s+(.+?)(?:\s+(?:com|de|para|e\s|$))/i,
-    /(?:editar|alterar|mudar|atualizar)\s+(?:o\s+|a\s+)?(?:cliente|funcionario|servico)\s+(.+?)(?:\s+(?:com|de|para|e\s|campo|$))/i,
+    // CRUD explícito de entidade
+    /(?:cadastrar|criar|adicionar|novo|nova|registrar)\s+(?:o\s+|a\s+)?(?:cliente|funcionario|servico)\s+(.+?)(?:\s+(?:com|de|para|e\s|,|$))/i,
+    /(?:editar|alterar|mudar|atualizar)\s+(?:o\s+|a\s+)?(?:cliente|funcionario|servico)\s+(.+?)(?:\s+(?:com|de|para|e\s|campo|,|$))/i,
     /(?:excluir|remover|deletar|apagar)\s+(?:o\s+|a\s+)?(?:cliente|funcionario|servico)\s+(.+?)$/i,
     /(?:buscar|procurar|encontrar|pesquisar)\s+(?:o\s+|a\s+)?(?:cliente|funcionario|servico)?\s*(.+?)$/i,
-    /(?:historico|atendimentos|visitas)\s+(?:do|da|de)\s+(.+?)$/i,
+    /(?:historico|atendamentos|visitas)\s+(?:do|da|de)\s+(.+?)$/i,
+    // Agendar/marcar — só captura nome se vier ANTES de "dia/as/hoje"
+    // e NÃO começa com dígito ou palavra não-nome
+    /(?:agendar?e?|marcar?|reservar)\s+(?:a\s+|o\s+)?([A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ\s]{1,59})(?:\s+(?:para|hoje|amanha|as\s|no\s|na\s|em\s|dia\s|,|$))/i,
   ];
 
   for (const pattern of namePatterns) {
     const match = text.match(pattern);
     if (match && match[1]) {
-      const name = match[1].trim().replace(/[.,!?]+$/, "");
-      if (name.length >= 2 && name.length <= 60) return name;
+      const name = match[1].trim().replace(/[.,!?]+$/, "").trim();
+      if (isValidName(name)) return name;
     }
   }
 
@@ -454,19 +482,25 @@ function extractProperName(text: string, q: string): string | null {
     "que", "se", "me", "te", "lhe", "eu", "ele", "ela", "voce",
     "meu", "minha", "seu", "sua", "nosso", "nossa",
     "criar", "editar", "excluir", "buscar", "listar", "cadastrar", "alterar",
+    "agendar", "marcar", "cancelar", "mover", "reagendar",
     "cliente", "funcionario", "servico", "caixa", "agenda", "relatorio",
     "novo", "nova", "como", "esta", "hoje", "ontem", "amanha",
     "sim", "nao", "ok", "bom", "boa", "dia", "noite", "tarde",
+    "corte", "escova", "progressiva", "manicure", "pedicure", "tintura",
+    "coloracao", "hidratacao", "alisamento", "procedimento", "tratamento",
+    "servico", "horario", "minutos", "horas",
   ]);
 
   const words = text.split(/\s+/);
   const properWords = words.filter(w =>
     w.length >= 2 &&
-    /^[A-Z]/.test(w) &&
-    !commonWords.has(w.toLowerCase())
+    /^[A-ZÀ-Ö]/.test(w) &&
+    !commonWords.has(w.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""))
   );
   if (properWords.length > 0) {
-    return properWords.join(" ");
+    const candidate = properWords.join(" ");
+    // Só retorna se passar na validação de nome
+    if (isValidName(candidate)) return candidate;
   }
 
   return null;
@@ -698,3 +732,4 @@ export function fuzzyMatch(input: string, target: string, threshold = 0.7): bool
   const similarity = 1 - distance / maxLen;
   return similarity >= threshold;
 }
+
