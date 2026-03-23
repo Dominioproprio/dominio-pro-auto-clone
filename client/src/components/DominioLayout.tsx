@@ -8,6 +8,7 @@ import { useLocation } from "wouter";
 import { getSession, clearSession, MENU_VISIBILITY, isAccessControlEnabled } from "@/lib/access";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/contexts/ThemeContext";
+import { trackAction } from "@/lib/agentTracker";
 import {
   Calendar, Users, UserCheck, Scissors, DollarSign,
   BarChart2, Settings, History, Database, Menu, X,
@@ -310,6 +311,7 @@ export default function DominioLayout({ children, onNewAppt }: {
   }, []);
 
   const navigate = (path: string) => {
+    trackAction("navigate", path.replace(/^\/+/, "") || "dashboard", path);
     setLocation(path);
     setSidebarOpen(false);
   };
@@ -500,7 +502,7 @@ export default function DominioLayout({ children, onNewAppt }: {
           <div className="flex items-center gap-2 ml-auto">
             {/* Botão novo agendamento — desktop */}
             {onNewAppt && (
-              <button onClick={onNewAppt}
+              <button onClick={() => { trackAction("click", "new_appointment", "topbar desktop"); onNewAppt(); }}
                 className="hidden md:flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-all hover:opacity-90 active:scale-95"
                 style={{
                   background: `linear-gradient(135deg, ${accent}, ${accent}cc)`,
@@ -568,7 +570,7 @@ export default function DominioLayout({ children, onNewAppt }: {
 
         {/* ── FAB novo agendamento — mobile ── */}
         {onNewAppt && (
-          <button onClick={onNewAppt}
+          <button onClick={() => { trackAction("click", "new_appointment", "FAB mobile"); onNewAppt(); }}
             className="md:hidden fixed bottom-20 right-5 z-30 w-14 h-14 rounded-2xl flex items-center justify-center shadow-2xl transition-all active:scale-90"
             style={{
               background: `linear-gradient(135deg, ${accent}, ${accent}cc)`,
