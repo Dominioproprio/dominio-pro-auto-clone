@@ -905,7 +905,270 @@ export const tools: AgentTool[] = [
     },
   },
 
-  // ── 20. Reabrir Caixa ──
+  // ── 20. Criar Agendamento ──
+  {
+    id: "criar_agendamento",
+    name: "Criar Agendamento",
+    description: "agendar atendimento para um cliente",
+    requiredParams: ["nome"],
+    optionalParams: ["data", "hora", "funcionario", "servico", "observacoes"],
+    confirmationRequired: false,
+    execute: async (params) => {
+      // Resolver cliente
+      const client = findClientByName(params.nome);
+      const clientName = client ? client.name : params.nome;
+      const clientId = client ? client.id : null;
+
+      // Resolver funcionário (se informado, senão pega o primeiro ativo)
+      let employeeId: number;
+      if (params.funcionario) {
+        const emp = findEmployeeByName(params.funcionario);
+        if (!emp) {
+          return { success: false, message: `Nao encontrei o funcionario "${params.funcionario}". Verifique o nome.` };
+        }
+        employeeId = emp.id;
+      } else {
+        const activeEmps = employeesStore.list(true);
+        if (activeEmps.length === 0) {
+          return { success: false, message: "Nao ha funcionarios cadastrados. Cadastre um funcionario antes de agendar." };
+        }
+        employeeId = activeEmps[0].id;
+      }
+
+      // Resolver serviços (se informado)
+      let services: { serviceId: number; name: string; price: number; durationMinutes: number; color: string; materialCostPercent: number }[] = [];
+      let totalDuration = 60;
+      let totalPrice = 0;
+      if (params.servico) {
+        const svc = findServiceByName(params.servico);
+        if (svc) {
+          services = [{ serviceId: svc.id, name: svc.name, price: svc.price, durationMinutes: svc.durationMinutes, color: svc.color, materialCostPercent: svc.materialCostPercent }];
+          totalDuration = svc.durationMinutes;
+          totalPrice = svc.price;
+        }
+      }
+
+      // Resolver data
+      let dateStr: string;
+      const today = new Date();
+      if (params.data) {
+        dateStr = params.data;
+      } else {
+        dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+      }
+
+      // Resolver hora
+      let hour = 10;
+      let minute = 0;
+      if (params.hora) {
+        const timeParts = params.hora.split(":");
+        hour = parseInt(timeParts[0], 10);
+        minute = parseInt(timeParts[1] ?? "0", 10);
+      }
+
+      // Validar hora no passado
+      const startDate = new Date(`${dateStr}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`);
+      if (startDate < new Date()) {
+        // Se a hora já passou mas é hoje, avisa mas cria mesmo assim
+      }
+
+      const startTime = `${dateStr}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
+      const endDate = new Date(startDate.getTime() + totalDuration * 60 * 1000);
+      const endTime = `${dateStr}T${String(endDate.getHours()).padStart(2, "0")}:${String(endDate.getMinutes()).padStart(2, "0")}:00`;
+
+      const appt = await appointmentsStore.create({
+        clientName: clientName,
+        clientId: clientId,
+        employeeId,
+        startTime,
+        endTime,
+        status: "scheduled",
+        totalPrice: totalPrice > 0 ? totalPrice : null,
+        notes: params.observacoes ?? null,
+        paymentStatus: null,
+        groupId: null,
+        services,
+      });
+
+      const empName = employeesStore.list(false).find(e => e.id === employeeId)?.name ?? "";
+      const horaStr = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+      let msg = `Agendamento criado com sucesso!\n\n`;
+      msg += `- **Cliente:** ${clientName}\n`;
+      msg += `- **Data:** ${dateStr.split("-").reverse().join("/")}\n`;
+      msg += `- **Horario:** ${horaStr}\n`;
+      if (empName) msg += `- **Profissional:** ${empName}\n`;
+      if (services.length > 0) msg += `- **Servico:** ${services.map(s => s.name).join(", ")}\n`;
+      if (totalPrice > 0) msg += `- **Valor:** ${formatCurrency(totalPrice)}\n`;
+
+      return {
+        success: true,
+        message: msg,
+        data: appt,
+        navigateTo: "/agenda",
+      };
+    },
+  },
+
+  // ── 21. Cancelar Agendamento ──
+  {
+    id: "cancelar_agendamento",
+    name: "Cancelar Agendamento",
+    description: "cancelar um agendamento existente",
+    requiredParams: ["nome"],
+    optionalParams: ["data", "hora"],
+    confirmationRequired: true,
+    execute: async (params) => {
+      const today = new Date();
+      const dateStr = params.data ?? `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+
+      const allAppts = appointmentsStore.list({ date: dateStr });
+      const norm = normalize(params.nome);
+      const matching = allAppts.filter(a =>
+        a.status !== "cancelled" &&
+        a.clientName &&
+        normalize(a.clientName).includes(norm)
+      );
+
+      if (matching.length === 0) {
+        return { success: false, message: `Nao encontrei agendamentos para "${params.nome}" em ${dateStr.split("-").reverse().join("/")}.` };
+      }
+
+      // Se tem hora específica, filtra
+      if (params.hora && matching.length > 1) {
+        const withHour = matching.filter(a => a.startTime.includes(`T${params.hora}`));
+        if (withHour.length === 1) {
+          await appointmentsStore.update(withHour[0].id, { status: "cancelled" });
+          return { success: true, message: `Agendamento de "${withHour[0].clientName}" as ${params.hora} cancelado.` };
+        }
+      }
+
+      // Cancela o primeiro encontrado
+      const appt = matching[0];
+      await appointmentsStore.update(appt.id, { status: "cancelled" });
+      const hora = appt.startTime.split("T")[1]?.slice(0, 5) ?? "";
+      return {
+        success: true,
+        message: `Agendamento de "${appt.clientName}" as ${hora} cancelado com sucesso.`,
+        navigateTo: "/agenda",
+      };
+    },
+  },
+
+  // ── 22. Mover/Reagendar Agendamento ──
+  {
+    id: "mover_agendamento",
+    name: "Mover Agendamento",
+    description: "reagendar ou mover um agendamento para outro horario ou data",
+    requiredParams: ["nome"],
+    optionalParams: ["data", "hora", "funcionario"],
+    confirmationRequired: true,
+    execute: async (params) => {
+      const today = new Date();
+      const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+
+      // Buscar agendamentos do cliente (hoje ou futuro)
+      const allAppts = appointmentsStore.list({ startDate: todayStr });
+      const norm = normalize(params.nome);
+      const matching = allAppts.filter(a =>
+        a.status !== "cancelled" &&
+        a.clientName &&
+        normalize(a.clientName).includes(norm)
+      );
+
+      if (matching.length === 0) {
+        return { success: false, message: `Nao encontrei agendamentos ativos para "${params.nome}".` };
+      }
+
+      const appt = matching[0];
+      const updates: Partial<{ employeeId: number; startTime: string; endTime: string }> = {};
+
+      if (params.data || params.hora) {
+        const originalStart = new Date(appt.startTime);
+        const duration = new Date(appt.endTime).getTime() - originalStart.getTime();
+
+        let newDate = params.data ?? todayStr;
+        let newHour = originalStart.getHours();
+        let newMin = originalStart.getMinutes();
+        if (params.hora) {
+          const parts = params.hora.split(":");
+          newHour = parseInt(parts[0], 10);
+          newMin = parseInt(parts[1] ?? "0", 10);
+        }
+
+        const newStart = `${newDate}T${String(newHour).padStart(2, "0")}:${String(newMin).padStart(2, "0")}:00`;
+        const newEndDate = new Date(new Date(newStart).getTime() + duration);
+        const newEnd = `${newDate}T${String(newEndDate.getHours()).padStart(2, "0")}:${String(newEndDate.getMinutes()).padStart(2, "0")}:00`;
+
+        updates.startTime = newStart;
+        updates.endTime = newEnd;
+      }
+
+      if (params.funcionario) {
+        const emp = findEmployeeByName(params.funcionario);
+        if (emp) updates.employeeId = emp.id;
+      }
+
+      await appointmentsStore.update(appt.id, updates);
+      const newHora = updates.startTime?.split("T")[1]?.slice(0, 5) ?? appt.startTime.split("T")[1]?.slice(0, 5);
+      return {
+        success: true,
+        message: `Agendamento de "${appt.clientName}" reagendado para ${params.data ? params.data.split("-").reverse().join("/") + " " : ""}${newHora}.`,
+        navigateTo: "/agenda",
+      };
+    },
+  },
+
+  // ── 23. Listar Agendamentos ──
+  {
+    id: "listar_agendamentos",
+    name: "Listar Agendamentos",
+    description: "ver os agendamentos do dia ou de uma data especifica",
+    requiredParams: [],
+    optionalParams: ["data", "nome", "funcionario"],
+    confirmationRequired: false,
+    execute: async (params) => {
+      const today = new Date();
+      const dateStr = params.data ?? `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+
+      let appts = appointmentsStore.list({ date: dateStr });
+
+      // Filtrar por cliente
+      if (params.nome) {
+        const norm = normalize(params.nome);
+        appts = appts.filter(a => a.clientName && normalize(a.clientName).includes(norm));
+      }
+
+      // Filtrar por funcionário
+      if (params.funcionario) {
+        const emp = findEmployeeByName(params.funcionario);
+        if (emp) {
+          appts = appts.filter(a => a.employeeId === emp.id);
+        }
+      }
+
+      const active = appts.filter(a => a.status !== "cancelled");
+
+      if (active.length === 0) {
+        return { success: true, message: `Nenhum agendamento encontrado para ${dateStr.split("-").reverse().join("/")}.` };
+      }
+
+      const emps = employeesStore.list(false);
+      const lines = active.map(a => {
+        const hora = a.startTime.split("T")[1]?.slice(0, 5) ?? "";
+        const emp = emps.find(e => e.id === a.employeeId);
+        const status = a.status === "completed" ? " (concluido)" : a.status === "confirmed" ? " (confirmado)" : a.status === "in_progress" ? " (em andamento)" : "";
+        return `- **${hora}** — ${a.clientName ?? "Sem nome"}${emp ? ` c/ ${emp.name}` : ""}${a.totalPrice ? ` — ${formatCurrency(a.totalPrice)}` : ""}${status}`;
+      });
+
+      return {
+        success: true,
+        message: `**Agendamentos ${dateStr.split("-").reverse().join("/")}** (${active.length}):\n\n${lines.join("\n")}`,
+        navigateTo: "/agenda",
+      };
+    },
+  },
+
+  // ── 24. Reabrir Caixa ──
   {
     id: "reabrir_caixa",
     name: "Reabrir Caixa",
