@@ -544,10 +544,15 @@ export function answerQuestion(question: string): string {
       const result = prepareAction(params);
       return result.message;
     }
-    return "Entendi que voce quer alterar agendamentos, mas nao consegui interpretar todos os detalhes. Tente algo como:\n\n" +
+    return "Entendi que voce quer mexer na agenda, mas nao consegui interpretar todos os detalhes. Tente algo como:\n\n" +
+      "**Criar agendamento:**\n" +
+      "- \"Agenda um corte para Ana Maria na sexta as 14h com a Joana\"\n" +
+      "- \"Marca um horario para o Joao amanha as 10h, escova progressiva\"\n\n" +
+      "**Mover/Reagendar:**\n" +
       "- \"Troque os agendamentos de [nome] de segunda para sabado dia 5\"\n" +
-      "- \"Cancela os agendamentos de amanha\"\n" +
-      "- \"Move os agendamentos do Joao de hoje para sexta\"";
+      "- \"Reagenda o horario da Maria de amanha para quinta as 10h\"\n\n" +
+      "**Cancelar:**\n" +
+      "- \"Cancela os agendamentos de amanha\"";
   }
 
   // ── 2. Verificar se e um comando de agendamento recorrente ──
