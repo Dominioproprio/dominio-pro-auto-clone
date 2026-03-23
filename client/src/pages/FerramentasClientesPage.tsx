@@ -76,6 +76,24 @@ function mergeClientGroup(group: Client[]): { keep: Client; removeIds: number[] 
 }
 
 /** Parse CSV text para array de objetos */
+/**
+ * Sanitiza texto para corrigir double-encoding comum em planilhas Windows/Excel BR.
+ * Ex: "GonÃ§alves" (latin1 lido como UTF-8) → "Gonçalves"
+ * Tenta decodificar via TextDecoder se detectar o padrão corrompido.
+ */
+function sanitizeEncoding(text: string): string {
+  if (!text) return text;
+  // Detecta o padrão clássico de latin1-como-UTF8: sequências Ã seguidas de char estranho
+  if (!/Ã[€-¿]|Â[€-¿]|Ã[À-ÿ]/.test(text)) return text;
+  try {
+    // Reconstrói bytes a partir dos char codes e re-decodifica como latin1
+    const bytes = new Uint8Array(text.split("").map(c => c.charCodeAt(0) & 0xff));
+    return new TextDecoder("iso-8859-1").decode(bytes);
+  } catch {
+    return text;
+  }
+}
+
 function parseCSV(text: string): Record<string, string>[] {
   const lines = text.split(/\r?\n/).filter(l => l.trim());
   if (lines.length < 2) return [];
@@ -112,13 +130,13 @@ function mapToClient(row: Record<string, string>): Omit<Client, "id" | "createdA
   const address   = row["endereço"]  || row["endereco"]        || row["address"]        || row["logradouro"] || row["rua"] || null;
   const notes     = row["observacao"]|| row["observações"]     || row["obs"]            || row["notes"] || row["notas"] || null;
   return {
-    name:      name.trim(),
-    email:     email?.trim()     || null,
-    phone:     phone?.trim()     || null,
-    birthDate: birthDate?.trim() || null,
-    cpf:       cpf?.trim()       || null,
-    address:   address?.trim()   || null,
-    notes:     notes?.trim()     || null,
+    name:      sanitizeEncoding(name.trim()),
+    email:     email     ? sanitizeEncoding(email.trim())     : null,
+    phone:     phone     ? sanitizeEncoding(phone.trim())     : null,
+    birthDate: birthDate ? sanitizeEncoding(birthDate.trim()) : null,
+    cpf:       cpf       ? sanitizeEncoding(cpf.trim())       : null,
+    address:   address   ? sanitizeEncoding(address.trim())   : null,
+    notes:     notes     ? sanitizeEncoding(notes.trim())     : null,
   };
 }
 
@@ -252,7 +270,9 @@ export default function FerramentasClientesPage() {
       reader.onload = (ev) => {
         try {
           const data = new Uint8Array(ev.target?.result as ArrayBuffer);
-          const workbook = XLSX.read(data, { type: "array" });
+          // type:"array" + codepage 1252 garante leitura correta de .xls/.xlsx
+          // gerados pelo Excel BR (Windows-1252 / latin1)
+          const workbook = XLSX.read(data, { type: "array", codepage: 1252 });
           const sheet = workbook.Sheets[workbook.SheetNames[0]];
           const rows: Record<string, string>[] = XLSX.utils.sheet_to_json(sheet, { defval: "" });
           const normalized = rows.map(row =>
@@ -272,30 +292,52 @@ export default function FerramentasClientesPage() {
       };
       reader.readAsArrayBuffer(file);
     } else {
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        try {
-          const text = ev.target?.result as string;
-          if (file.name.endsWith(".json")) {
-            const json = JSON.parse(text);
-            const arr = Array.isArray(json) ? json : json.clients || json.clientes || [];
-            const parsed = arr.map((item: any) => mapToClient(item)).filter(Boolean) as Omit<Client, "id" | "createdAt">[];
-            if (parsed.length === 0) {
-              toast.error("Nenhum cliente encontrado no arquivo. Verifique se há uma coluna 'nome'.");
-              return;
-            }
-            setImportPreview(parsed);
-            setImportModalOpen(true);
-          } else {
-            processRows(parseCSV(text));
+      // Detecta encoding: tenta UTF-8 primeiro; se houver caracteres inválidos,
+      // refaz com ISO-8859-1 (padrão de planilhas exportadas no Windows/Excel BR)
+      const readWithEncoding = (encoding: string) =>
+        new Promise<string>((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = (ev) => resolve(ev.target?.result as string);
+          r.onerror = reject;
+          r.readAsText(file, encoding);
+        });
+
+      const processText = async (text: string) => {
+        if (file.name.endsWith(".json")) {
+          const json = JSON.parse(text);
+          const arr = Array.isArray(json) ? json : json.clients || json.clientes || [];
+          const parsed = arr.map((item: any) => mapToClient(item)).filter(Boolean) as Omit<Client, "id" | "createdAt">[];
+          if (parsed.length === 0) {
+            toast.error("Nenhum cliente encontrado no arquivo. Verifique se há uma coluna 'nome'.");
+            return;
           }
+          setImportPreview(parsed);
+          setImportModalOpen(true);
+        } else {
+          processRows(parseCSV(text));
+        }
+      };
+
+      (async () => {
+        try {
+          // 1ª tentativa: UTF-8
+          let text = await readWithEncoding("UTF-8");
+
+          // Detecta double-encoding: sequência típica de latin1 lido como UTF-8
+          // ex: "Ã§" = ç mal decodificado, "Ã£" = ã, "Ã©" = é
+          const hasGarbled = /Ã[€-¿]|Â[€-¿]/.test(text);
+          if (hasGarbled) {
+            // Refaz com ISO-8859-1 (latin1) — encoding padrão do Excel BR
+            text = await readWithEncoding("ISO-8859-1");
+          }
+
+          await processText(text);
         } catch {
           toast.error("Erro ao ler o arquivo. Verifique o formato.");
         } finally {
           if (fileInputRef.current) fileInputRef.current.value = "";
         }
-      };
-      reader.readAsText(file);
+      })();
     }
   }, []);
 
