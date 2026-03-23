@@ -1,4 +1,3 @@
-import AgentChat from "./components/AgentChat";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
@@ -24,6 +23,7 @@ import { toast } from "sonner";
 import { fetchAllData, autoOpenCashIfNeeded } from "./lib/store";
 import { getSession, clearSession, canAccess, getDefaultRoute, isAccessControlEnabled } from "./lib/access";
 import ProfileSelector from "./components/ProfileSelector";
+import AgentChat from "./components/AgentChat";
 
 function getAccent() {
   try {
@@ -150,6 +150,7 @@ function AppContent() {
         <Route path="/configuracoes" component={ConfiguracoesPage} />
         <Route component={NotFound} />
       </Switch>
+      <AgentChat />
     </DominioLayout>
   );
 }
