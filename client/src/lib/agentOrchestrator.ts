@@ -460,9 +460,10 @@ export function getDynamicQuickActions(currentPage: string): DynamicQuickAction[
       { label: "Clientes inativos", query: "listar clientes inativos", icon: "users" },
     ],
     agenda: [
-      { label: "Agenda de hoje", query: "como esta minha agenda hoje?", icon: "calendar" },
-      { label: "Cancelamentos do mes", query: "quantos cancelamentos este mes?", icon: "x" },
-      { label: "Novo agendamento", query: "como agendar?", icon: "plus" },
+      { label: "Agenda de hoje", query: "listar agendamentos de hoje", icon: "calendar" },
+      { label: "Novo agendamento", query: "agendar cliente", icon: "plus" },
+      { label: "Cancelar agendamento", query: "cancelar agendamento de", icon: "x" },
+      { label: "Reagendar", query: "reagendar agendamento de", icon: "clock" },
     ],
     clientes: [
       { label: "Cadastrar cliente", query: "cadastrar novo cliente", icon: "plus" },
@@ -514,6 +515,12 @@ export function getDynamicQuickActions(currentPage: string): DynamicQuickAction[
     if (lastIntent === "buscar_cliente") {
       actions.unshift({ label: "Buscar outro", query: "buscar cliente", icon: "search" });
     }
+    if (lastIntent === "criar_agendamento") {
+      actions.unshift({ label: "Novo agendamento", query: "agendar cliente", icon: "plus" });
+    }
+    if (lastIntent === "listar_agendamentos") {
+      actions.unshift({ label: "Agendar novo", query: "agendar cliente", icon: "plus" });
+    }
   }
 
   // Limitar a 6 ações
@@ -536,6 +543,13 @@ export const PHRASE_TEMPLATES = [
   // Serviços
   "Cadastrar servico {nome} por R$ {valor}",
   "Listar servicos",
+  // Agendamentos
+  "Agendar {nome} para hoje as {hora}",
+  "Agendar {nome} amanha as {hora} com {funcionario}",
+  "Cancelar agendamento de {nome}",
+  "Reagendar {nome} para {hora}",
+  "Ver agendamentos de hoje",
+  "Agendamentos de amanha",
   // Caixa
   "Abrir caixa",
   "Fechar caixa",
