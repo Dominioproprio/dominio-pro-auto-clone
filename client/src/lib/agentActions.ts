@@ -10,12 +10,16 @@
  * - "Cancela os agendamentos de amanha"
  * - "Reagenda o horario das 14h de hoje para amanha as 15h"
  * - "Move os agendamentos do Joao de hoje para sexta"
+ * - "Agenda um corte para Ana Maria na sexta as 14h com a Joana"
+ * - "Marca um horario para o Joao amanha as 10h, escova progressiva"
+ * - "Cria um agendamento para hoje as 16h para Maria, manicure com Carla"
  */
 
 import {
   appointmentsStore,
   clientsStore,
   employeesStore,
+  servicesStore,
 } from "./store";
 
 // ─── Tipos ─────────────────────────────────────────────────
@@ -25,6 +29,7 @@ export type ActionType =
   | "cancel_appointments"      // cancelar agendamentos
   | "reschedule_single"        // reagendar um agendamento especifico
   | "change_employee"          // trocar funcionario de agendamentos
+  | "create_appointment"       // criar novo agendamento
   | "unknown_action";
 
 export interface PendingAction {
@@ -57,6 +62,9 @@ export interface ActionParams {
   targetDayOfWeek?: number;      // 0-6
   targetTime?: string;           // HH:mm
   targetEmployeeName?: string;
+  // Para criacao de agendamento
+  serviceName?: string;
+  duration?: number;             // minutos
   // Acao
   actionType: ActionType;
 }
@@ -223,28 +231,77 @@ function findEmployeeByName(name: string): { id: number; name: string } | null {
   return null;
 }
 
+// ─── Busca de servico por nome ─────────────────────────────
+
+function findServiceByName(name: string): { id: number; name: string; duration: number; price: number } | null {
+  const services = servicesStore.list();
+  const norm = normalize(name);
+
+  // Busca exata
+  let found = services.find(s => normalize(s.name) === norm);
+  if (found) return { id: found.id, name: found.name, duration: found.duration ?? 60, price: found.price ?? 0 };
+
+  // Busca parcial
+  found = services.find(s => normalize(s.name).includes(norm));
+  if (found) return { id: found.id, name: found.name, duration: found.duration ?? 60, price: found.price ?? 0 };
+
+  // Busca por parte do nome
+  found = services.find(s => norm.includes(normalize(s.name)));
+  if (found) return { id: found.id, name: found.name, duration: found.duration ?? 60, price: found.price ?? 0 };
+
+  // Busca fuzzy por palavras
+  const nameParts = norm.split(" ").filter(p => p.length > 2);
+  if (nameParts.length > 0) {
+    found = services.find(s => {
+      const sNorm = normalize(s.name);
+      return nameParts.some(p => sNorm.includes(p));
+    });
+    if (found) return { id: found.id, name: found.name, duration: found.duration ?? 60, price: found.price ?? 0 };
+  }
+
+  return null;
+}
+
 // ─── Deteccao de intencao de acao na agenda ────────────────
 
 export function isAgendaActionCommand(text: string): boolean {
   const q = normalize(text);
   const patterns = [
+    // Mover/transferir
     /troqu?e?\s+.*agendamento/,
     /mov[ae]\s+.*agendamento/,
     /transfer[ei]\s+.*agendamento/,
     /reagend[ae]/,
     /mude?\s+.*agendamento/,
     /pass[ae]\s+.*agendamento/,
+    // Cancelar
     /cancel[ae]\s+.*agendamento/,
     /desmarqu?e?\s+.*agendamento/,
+    // Mover horario
     /troqu?e?\s+.*horario/,
     /mov[ae]\s+.*horario/,
     /transfer[ei]\s+.*horario/,
+    // Com datas
     /agendamento.*para\s+(segunda|terca|quarta|quinta|sexta|sabado|domingo|amanha|dia\s+\d)/,
     /troque?\s+.*d[aoe]\s+\w+.*para\s+(segunda|terca|quarta|quinta|sexta|sabado|domingo|amanha|dia\s+\d)/,
     /mov[ae]\s+.*d[aoe]\s+\w+.*para/,
     /transfer[ei]\s+.*d[aoe]\s+\w+.*para/,
+    // Trocar funcionario
     /troqu?e?\s+o\s+funcionario/,
     /mude?\s+o\s+profissional/,
+    // NOVO: Criar agendamento
+    /agend[ae]\s+(um|uma|o|a)?/,
+    /marc[ae]\s+(um|uma|o|a)?\s*(horario|agendamento|atendimento)/,
+    /marc[ae]\s+(um|uma)\s/,
+    /cri[ae]\s+(um|uma)?\s*(agendamento|horario|atendimento)/,
+    /faz\s+(um|uma)?\s*(agendamento|horario)/,
+    /marqu?e?\s+(um|uma)?\s*(horario|agendamento)/,
+    /coloc[ae]\s+(um|uma)?\s*(agendamento|horario)/,
+    /encaix[ae]/,
+    /agenda\s+para/,
+    /marca\s+para/,
+    /agendar\s/,
+    /marcar\s+(um|uma)?\s/,
   ];
   return patterns.some(p => p.test(q));
 }
@@ -255,7 +312,7 @@ export function parseAgendaAction(text: string): ActionParams | null {
   const q = normalize(text);
 
   // ── Cancelar agendamentos ──
-  if (/cancel[ae]|desmarqu?e?/.test(q)) {
+  if (/cancel[ae]|desmarqu?e?/.test(q) && !isCreateIntent(q)) {
     const clientName = extractClientName(q);
     const { date: sourceDate } = parseDateFromText(q, "source");
 
@@ -279,7 +336,12 @@ export function parseAgendaAction(text: string): ActionParams | null {
     };
   }
 
-  // ── Mover/transferir/trocar agendamentos ──
+  // ── NOVO: Criar agendamento ──
+  if (isCreateIntent(q)) {
+    return parseCreateAppointment(q);
+  }
+
+  // ── Mover/transferir/trocar/reagendar agendamentos ──
   if (/troqu?e?|mov[ae]|transfer[ei]|reagend[ae]|pass[ae]|mude?/.test(q)) {
     const clientName = extractClientName(q);
     const employeeName = extractEmployeeName(q);
@@ -329,6 +391,128 @@ export function parseAgendaAction(text: string): ActionParams | null {
       targetDate: targetDate ?? undefined,
       targetTime,
     };
+  }
+
+  return null;
+}
+
+// ─── Deteccao de intencao de criacao ───────────────────────
+
+function isCreateIntent(q: string): boolean {
+  return /agend[ae]\s+(um|uma|o|a)?|marc[ae]\s+(um|uma)|cri[ae]\s+(um|uma)?\s*(agendamento|horario|atendimento)|faz\s+(um|uma)?\s*(agendamento|horario)|marqu?e?\s+(um|uma)|coloc[ae]\s+(um|uma)|encaix[ae]|agenda\s+para|marca\s+para|agendar\s|marcar\s/.test(q);
+}
+
+// ─── Parser para criacao de agendamento ────────────────────
+
+function parseCreateAppointment(q: string): ActionParams {
+  // Extrair cliente
+  const clientName = extractClientNameForCreation(q) ?? extractClientName(q);
+
+  // Extrair funcionario
+  const employeeName = extractEmployeeNameForCreation(q) ?? extractEmployeeName(q);
+
+  // Extrair servico
+  const serviceName = extractServiceName(q);
+
+  // Extrair data
+  const { date: targetDate } = parseDateFromText(q, "target");
+
+  // Extrair horario
+  let targetTime: string | undefined;
+  // Tentar varios padroes de horario
+  const timePatterns = [
+    /(?:as?|para\s+as?)\s+(\d{1,2}):(\d{2})/,
+    /(?:as?|para\s+as?)\s+(\d{1,2})\s*h\s*(\d{2})?/,
+    /(\d{1,2}):(\d{2})/,
+    /(\d{1,2})\s*h\s*(\d{2})?/,
+  ];
+  for (const pattern of timePatterns) {
+    const match = q.match(pattern);
+    if (match) {
+      const h = parseInt(match[1], 10);
+      const m = parseInt(match[2] ?? "0", 10);
+      if (h >= 6 && h <= 22) { // horarios razoaveis para salao
+        targetTime = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+        break;
+      }
+    }
+  }
+
+  return {
+    actionType: "create_appointment",
+    clientName: clientName ?? undefined,
+    employeeName: employeeName ?? undefined,
+    serviceName: serviceName ?? undefined,
+    targetDate: targetDate ?? toDateStr(new Date()), // default: hoje
+    targetTime,
+  };
+}
+
+// ─── Extratores de nome para criacao ───────────────────────
+
+function extractClientNameForCreation(q: string): string | null {
+  // Padroes: "para [NOME]", "da/do/de [NOME]"
+  const patterns = [
+    /(?:para|pra|pro)\s+(?:a\s+|o\s+)?([A-Za-z\u00C0-\u024F][\w\s\u00C0-\u024F]+?)(?:\s+(?:na|no|em|as?|hoje|amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo|dia|,|$))/i,
+    /(?:d[aoe])\s+([A-Za-z\u00C0-\u024F][\w\s\u00C0-\u024F]+?)(?:\s+(?:na|no|em|as?|para|pro|pra|hoje|amanha|,|$))/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = q.match(pattern);
+    if (match && match[1]) {
+      const name = match[1].trim();
+      // Verificar se e um cliente cadastrado
+      const client = findClientByName(name);
+      if (client) return client.name;
+    }
+  }
+
+  // Busca ampla por nome de cliente no texto
+  const clients = clientsStore.list();
+  for (const client of clients) {
+    const clientNorm = normalize(client.name);
+    if (q.includes(clientNorm)) return client.name;
+    const parts = clientNorm.split(" ").filter(p => p.length > 2);
+    if (parts.length >= 2 && parts.filter(p => q.includes(p)).length >= 2) return client.name;
+  }
+
+  return null;
+}
+
+function extractEmployeeNameForCreation(q: string): string | null {
+  // Padroes: "com [NOME]", "com a/o [NOME]"
+  const match = q.match(/com\s+(?:a\s+|o\s+)?([A-Za-z\u00C0-\u024F][\w\s\u00C0-\u024F]+?)(?:\s*$|\s+(?:na|no|as?|em|,))/i);
+  if (match && match[1]) {
+    const name = match[1].trim();
+    const emp = findEmployeeByName(name);
+    if (emp) return emp.name;
+  }
+  return extractEmployeeName(q);
+}
+
+function extractServiceName(q: string): string | null {
+  // Tentar busca direta nos servicos cadastrados
+  const services = servicesStore.list();
+  for (const svc of services) {
+    const svcNorm = normalize(svc.name);
+    if (q.includes(svcNorm)) return svc.name;
+    // Busca parcial
+    const parts = svcNorm.split(" ").filter(p => p.length > 3);
+    if (parts.length > 0 && parts.some(p => q.includes(p))) return svc.name;
+  }
+
+  // Padroes comuns: "um corte", "uma escova", "manicure"
+  const servicePatterns = [
+    /(?:agend[ae]|marc[ae]|cri[ae]|faz|marqu?e?|coloc[ae])\s+(?:um|uma)\s+([\w\s\u00C0-\u024F]+?)(?:\s+(?:para|pra|pro|com|na|no|as?|em|hoje|amanha)|,|$)/i,
+    /,\s*([\w\s\u00C0-\u024F]+?)(?:\s+(?:com|na|no|as?)|$)/i,
+  ];
+  for (const pattern of servicePatterns) {
+    const match = q.match(pattern);
+    if (match && match[1]) {
+      const name = match[1].trim();
+      const svc = findServiceByName(name);
+      if (svc) return svc.name;
+    }
   }
 
   return null;
@@ -430,6 +614,11 @@ function extractDatesFromText(q: string): string[] {
 // ─── Preparacao de acao (preview) ──────────────────────────
 
 export function prepareAction(params: ActionParams): ActionResult {
+  // ── Criar novo agendamento (fluxo especial) ──
+  if (params.actionType === "create_appointment") {
+    return prepareCreateAppointment(params);
+  }
+
   const allAppts = appointmentsStore.list({});
 
   // Filtrar agendamentos afetados
@@ -559,6 +748,120 @@ export function prepareAction(params: ActionParams): ActionResult {
   };
 }
 
+// ─── Preparar criacao de agendamento (preview) ─────────────
+
+function prepareCreateAppointment(params: ActionParams): ActionResult {
+  // Validar campos obrigatorios
+  const missing: string[] = [];
+  if (!params.clientName) missing.push("cliente (ex: para Ana Maria)");
+  if (!params.targetTime) missing.push("horario (ex: as 14h)");
+
+  if (missing.length > 0) {
+    return {
+      success: false,
+      message: `Para criar um agendamento, preciso de mais informacoes:\n\n` +
+        missing.map(m => `- **${m}**`).join("\n") +
+        `\n\nExemplo: "Agenda um corte para Ana Maria na sexta as 14h com a Joana"`,
+    };
+  }
+
+  // Buscar cliente
+  const client = findClientByName(params.clientName!);
+  if (!client) {
+    return {
+      success: false,
+      message: `Nao encontrei o cliente "${params.clientName}". Verifique o nome e tente novamente.`,
+    };
+  }
+
+  // Buscar funcionario (opcional)
+  let employee: { id: number; name: string } | null = null;
+  if (params.employeeName) {
+    employee = findEmployeeByName(params.employeeName);
+    if (!employee) {
+      return {
+        success: false,
+        message: `Nao encontrei o profissional "${params.employeeName}". Verifique o nome e tente novamente.`,
+      };
+    }
+  } else {
+    // Pegar primeiro funcionario ativo como padrao
+    const emps = employeesStore.list(false);
+    if (emps.length > 0) employee = { id: emps[0].id, name: emps[0].name };
+  }
+
+  // Buscar servico (opcional)
+  let service: { id: number; name: string; duration: number; price: number } | null = null;
+  if (params.serviceName) {
+    service = findServiceByName(params.serviceName);
+  }
+
+  // Data e horario
+  const targetDate = params.targetDate ?? toDateStr(new Date());
+  const targetTime = params.targetTime!;
+  const dateLabel = formatDatePT(targetDate);
+
+  // Duracao
+  const duration = service?.duration ?? params.duration ?? 60;
+
+  // Calcular horarios
+  const [h, m] = targetTime.split(":").map(Number);
+  const [year, month, day] = targetDate.split("-").map(Number);
+  const startTime = new Date(year, month - 1, day, h, m, 0, 0);
+  const endTime = new Date(startTime.getTime() + duration * 60 * 1000);
+
+  // Construir descricao do preview
+  const description = `Criar agendamento para ${client.name}`;
+  let details = `**Novo agendamento:**\n\n`;
+  details += `- **Cliente:** ${client.name}\n`;
+  if (service) {
+    details += `- **Servico:** ${service.name} (${duration} min — R$ ${service.price.toFixed(2)})\n`;
+  } else {
+    details += `- **Servico:** Nao especificado (${duration} min)\n`;
+  }
+  details += `- **Profissional:** ${employee?.name ?? "A definir"}\n`;
+  details += `- **Data:** ${dateLabel}\n`;
+  details += `- **Horario:** ${targetTime} - ${endTime.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}\n`;
+
+  const pendingAction: PendingAction = {
+    id: genActionId(),
+    type: "create_appointment",
+    description,
+    details,
+    affectedCount: 1,
+    affectedAppointments: [{
+      id: 0, // sera criado
+      clientName: client.name,
+      employeeName: employee?.name ?? "A definir",
+      serviceName: service?.name ?? "Servico geral",
+      startTime: targetTime,
+      date: dateLabel,
+    }],
+    params: {
+      ...params,
+      clientName: client.name,
+      employeeName: employee?.name ?? undefined,
+      serviceName: service?.name ?? undefined,
+      targetDate,
+      targetTime,
+      duration,
+    },
+    status: "pending_confirmation",
+    createdAt: Date.now(),
+  };
+
+  // Salvar acao pendente
+  const pending = loadPendingActions();
+  pending.push(pendingAction);
+  savePendingActions(pending);
+
+  return {
+    success: true,
+    message: `${details}\n**Deseja confirmar este agendamento?** Responda "sim" ou "confirma" para criar, ou "nao" para cancelar.`,
+    pendingAction,
+  };
+}
+
 // ─── Execucao de acao confirmada ───────────────────────────
 
 export function executeAction(actionId: string): ActionResult {
@@ -657,6 +960,63 @@ export function executeAction(actionId: string): ActionResult {
           success: true,
           message: `Pronto! ${changedCount} agendamento(s) transferido(s) para ${newEmp.name}.`,
         };
+      }
+
+      case "create_appointment": {
+        // Buscar entidades
+        const client = params.clientName ? findClientByName(params.clientName) : null;
+        if (!client) {
+          return { success: false, message: "Cliente nao encontrado para criar o agendamento." };
+        }
+
+        const employee = params.employeeName ? findEmployeeByName(params.employeeName) : null;
+        const service = params.serviceName ? findServiceByName(params.serviceName) : null;
+        const duration = params.duration ?? service?.duration ?? 60;
+        const targetDate = params.targetDate ?? toDateStr(new Date());
+        const targetTime = params.targetTime ?? "09:00";
+
+        const [h, m] = targetTime.split(":").map(Number);
+        const [year, month, day] = targetDate.split("-").map(Number);
+        const startTime = new Date(year, month - 1, day, h, m, 0, 0);
+        const endTime = new Date(startTime.getTime() + duration * 60 * 1000);
+
+        // Montar dados do agendamento
+        const appointmentData: Record<string, unknown> = {
+          clientId: client.id,
+          startTime: startTime.toISOString(),
+          endTime: endTime.toISOString(),
+          status: "scheduled",
+        };
+
+        if (employee) {
+          appointmentData.employeeId = employee.id;
+        }
+
+        if (service) {
+          appointmentData.services = [{
+            id: service.id,
+            name: service.name,
+            price: service.price,
+            duration: service.duration,
+          }];
+          appointmentData.totalPrice = service.price;
+        }
+
+        // Criar o agendamento
+        appointmentsStore.create(appointmentData);
+
+        action.status = "executed";
+        savePendingActions(pending);
+
+        const dateLabel = formatDatePT(targetDate);
+        let msg = `Pronto! Agendamento criado com sucesso:\n\n`;
+        msg += `- **Cliente:** ${client.name}\n`;
+        if (service) msg += `- **Servico:** ${service.name}\n`;
+        if (employee) msg += `- **Profissional:** ${employee.name}\n`;
+        msg += `- **Data:** ${dateLabel} as ${targetTime}\n`;
+        msg += `- **Duracao:** ${duration} min`;
+
+        return { success: true, message: msg };
       }
 
       default:
