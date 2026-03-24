@@ -312,17 +312,18 @@ Entities possíveis: clientName, employeeName, serviceName, date, time, dayOfWee
     const parsed = JSON.parse(jsonStr);
 
     return {
-      intent: parsed.intent ?? "outro",
-      confidence: parsed.confidence ?? 0.5,
-      entities: parsed.entities ?? {},
-      requiresAction: parsed.requiresAction ?? false,
+      intent: parsed.intent || "outro",
+      confidence: parsed.confidence || 0.5,
+      entities: parsed.entities || {},
+      requiresAction: !!parsed.requiresAction,
       actionType: parsed.actionType,
     };
-  } catch {
-    // Fallback se o LLM não retornar JSON válido
+  } catch (err) {
+    console.warn("[agentLLM] Erro ao classificar intenção via LLM:", err);
+    // Retorna um objeto vazio mas válido para não quebrar o orquestrador
     return {
       intent: "outro",
-      confidence: 0.3,
+      confidence: 0,
       entities: {},
       requiresAction: false,
     };
