@@ -272,11 +272,11 @@ const INTENT_PATTERNS: IntentPattern[] = [
 
   // ── Agendamentos ──
   {
-    intent: "criar_agendamento",
-    toolId: "criar_agendamento",
-    keywords: ["agendar", "agende", "marcar", "marca", "criar", "cadastrar", "novo", "nova", "registrar", "reservar", "booking"],
-    requiredAny: ["agendamento", "horario", "agendar", "agende", "marcar", "marca"],
-    bonusKeywords: ["cliente", "hoje", "amanha", "hora", "horas", "tarde", "manha"],
+    intent: "agendar",
+    toolId: "agendar",
+    keywords: ["agendar", "agende", "marcar", "marca", "criar", "cadastrar", "novo", "nova", "registrar", "reservar", "booking", "agenda"],
+    requiredAny: ["agendamento", "horario", "agendar", "agende", "marcar", "marca", "agenda"],
+    bonusKeywords: ["cliente", "hoje", "amanha", "hora", "horas", "tarde", "manha", "corte", "barba"],
     negativeKeywords: ["cancelar", "excluir", "mover", "trocar", "listar", "ver", "mostrar"],
   },
   {
