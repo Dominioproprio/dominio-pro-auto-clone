@@ -156,10 +156,18 @@ function AppContent() {
                   if (!/^\d{1,2}:\d{2}$/.test(resolvedTime)) resolvedTime = "09:00";
 
                   const services = servicesStore.list();
-                  const svc = services.find(s =>
-                    s.name.toLowerCase().includes(serviceName.toLowerCase()) ||
-                    serviceName.toLowerCase().includes(s.name.toLowerCase())
-                  ) ?? services[0];
+                  // Buscar serviço pelo serviceId (passado pelo orchestrator) ou por nome
+                  const svc = params.serviceId
+                    ? services.find(s => String(s.id) === String(params.serviceId))
+                    : services.find(s =>
+                        s.name.toLowerCase().includes(serviceName.toLowerCase()) ||
+                        serviceName.toLowerCase().includes(s.name.toLowerCase())
+                      );
+
+                  if (!svc) {
+                    const available = services.map(s => s.name).join(", ");
+                    return `Serviço "${serviceName}" não encontrado. Serviços disponíveis: ${available || "nenhum cadastrado"}`;
+                  }
 
                   const employees = employeesStore.list(true);
                   if (employees.length === 0) return "Nenhum funcionario cadastrado.";
@@ -171,32 +179,33 @@ function AppContent() {
                     .toISOString().slice(0, 16) + ":00";
 
                   const allClients = clientsStore.list();
-                  const foundClient = allClients.find(c =>
-                    c.name?.toLowerCase().includes(clientName.toLowerCase())
-                  );
+                  // Usar clientId já resolvido pelo orchestrator, ou buscar por nome
+                  const foundClient = params.clientId
+                    ? allClients.find(c => String(c.id) === String(params.clientId))
+                    : allClients.find(c => c.name?.toLowerCase().includes(clientName.toLowerCase()));
 
                   const newAppt = await appointmentsStore.create({
-                    clientName,
+                    clientName: foundClient?.name ?? clientName,
                     clientId: foundClient?.id ?? null,
                     employeeId: emp.id,
                     startTime,
                     endTime,
                     status: "scheduled",
-                    totalPrice: svc?.price ?? null,
+                    totalPrice: svc.price,
                     notes: null,
                     paymentStatus: null,
                     groupId: null,
-                    services: svc ? [{
+                    services: [{
                       serviceId: svc.id,
                       serviceName: svc.name,
                       price: svc.price,
                       durationMinutes: svc.durationMinutes,
                       employeeId: emp.id,
-                    }] : [],
+                    }],
                   });
 
                   window.dispatchEvent(new Event("store_updated"));
-                  return `Agendamento criado!\nCliente: ${clientName}\nServico: ${svc?.name ?? serviceName}\nData: ${resolvedDate} as ${resolvedTime}\nFuncionario: ${emp.name}`;
+                  return `Agendamento criado!\nCliente: ${foundClient?.name ?? clientName}\nServico: ${svc.name}\nData: ${resolvedDate} as ${resolvedTime}\nFuncionario: ${emp.name}`;
                 }
 
                 if (toolId === "cancelar_agendamento") {
