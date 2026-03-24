@@ -359,20 +359,31 @@ export function detectFollowUp(text: string): {
 function resolveEntityReference(entityType: string): string | null {
   // Mapear tipo de referência para chaves de entidade
   const typeToKeys: Record<string, string[]> = {
-    client: ["clientName", "client", "cliente"],
-    employee: ["employeeName", "employee", "funcionario", "profissional"],
+    client: ["clientName", "client", "cliente", "clientId"],
+    employee: ["employeeName", "employee", "funcionario", "profissional", "employeeId"],
     date: ["date", "sourceDate", "targetDate", "data"],
-    service: ["serviceName", "service", "servico"],
+    service: ["serviceName", "service", "servico", "serviceId"],
     time: ["time", "targetTime", "horario", "hora"],
   };
 
   const keys = typeToKeys[entityType];
   if (!keys) return null;
 
-  // Buscar nas entidades rastreadas (mais recente primeiro)
+  // Buscar nas entidades rastreadas considerando relevância (tópico ativo e recência)
   const sorted = [...context.trackedEntities]
     .filter(e => keys.includes(e.key))
-    .sort((a, b) => b.lastMentionedAt - a.lastMentionedAt);
+    .sort((a, b) => {
+      let scoreA = a.lastMentionedAt;
+      let scoreB = b.lastMentionedAt;
+      
+      // Dar peso extra se pertencer ao tópico ativo
+      if (context.activeTopic) {
+        if (a.topicId === context.activeTopic.id) scoreA += 1000000;
+        if (b.topicId === context.activeTopic.id) scoreB += 1000000;
+      }
+      
+      return scoreB - scoreA;
+    });
 
   if (sorted.length > 0) return sorted[0].value;
 
