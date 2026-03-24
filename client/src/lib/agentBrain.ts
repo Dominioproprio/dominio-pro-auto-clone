@@ -25,8 +25,8 @@ import { calcPeriodStats, getAppointmentsInPeriod, getPeriodDates } from "./anal
 import { isScheduleCommand, processCommand } from "./agentCommands";
 import { generateOnDemandReport } from "./agentReports";
 
-// --- IMPORTAÇÃO CORRIGIDA (ETAPA 2b/2c) ---
-import { handleUserMessage, getDynamicQuickActions, PHRASE_TEMPLATES, type OrchestratorResult, type DynamicQuickAction } from "./agentOrchestrator";
+// --- IMPORTAÇÃO CORRIGIDA PARA GITHUB MODELS ---
+import { handleUserMessage } from "./agentOrchestrator";
 
 import { setCurrentPage as setContextPage } from "./agentContext";
 import {
@@ -528,27 +528,23 @@ export function generateSuggestions(): AgentSuggestion[] {
 
 /**
  * Versao async que usa o orquestrador do Super Agente.
- * Tenta resolver pelo pipeline de tools primeiro; se nao tratar,
- * cai no fallback da logica existente (answerQuestion).
  */
 export async function answerQuestionAsync(question: string): Promise<{ message: string; navigateTo?: string }> {
   try {
-    // Chamada corrigida para handleUserMessage (Etapa 2c)
     const result = await handleUserMessage(question);
     if (result.handled) {
       return { message: result.text, navigateTo: result.navigateTo };
     }
   } catch {
-    // Se o orquestrador falhar, cai no fallback
+    // Fallback
   }
-  // Fallback: logica existente
   return { message: answerQuestion(question) };
 }
 
 export function answerQuestion(question: string): string {
   const q = question.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
-  // ── 0. Verificar se e confirmacao/negacao de acao pendente ──
+  // ── 0. Verificar acao pendente ──
   const pendingAction = getLatestPendingAction();
   if (pendingAction) {
     if (isConfirmation(question)) {
@@ -561,157 +557,43 @@ export function answerQuestion(question: string): string {
     }
   }
 
-  // ── 1. Verificar se e um comando de acao na agenda ────────
+  // ── 1. Comando de agenda ────────
   if (isAgendaActionCommand(question)) {
     const params = parseAgendaAction(question);
     if (params) {
       const result = prepareAction(params);
       return result.message;
     }
-    return "Entendi que voce quer mexer na agenda, mas nao consegui interpretar todos os detalhes. Tente algo como:\n\n" +
-      "**Criar agendamento:**\n" +
-      "- \"Agenda um corte para Ana Maria na sexta as 14h com a Joana\"\n" +
-      "- \"Marca um horario para o Joao amanha as 10h, escova progressiva\"\n\n" +
-      "**Mover/Reagendar:**\n" +
-      "- \"Troque os agendamentos de [nome] de segunda para sabado dia 5\"\n" +
-      "- \"Reagenda o horario da Maria de amanha para quinta as 10h\"\n\n" +
-      "**Cancelar:**\n" +
-      "- \"Cancela os agendamentos de amanha\"";
+    return "Entendi que voce quer mexer na agenda, mas tente ser mais especifico como: 'Marca corte para Maria amanha as 10h'.";
   }
 
-  // ── 2. Verificar se e um comando de agendamento recorrente ──
+  // ── 2. Comando recorrente ──
   if (isScheduleCommand(question)) {
     const result = processCommand(question);
-    if (result.understood) {
-      return result.message;
-    }
+    if (result.understood) return result.message;
   }
 
-  // ── 3. Verificar se e um pedido de relatorio ─────────────
+  // ── 3. Relatorio on-demand ─────────────
   const report = generateOnDemandReport(question);
   if (report) return report;
 
-  // ── 4. Perguntas sobre avisos/tarefas agendadas ──────────
+  // ── 4. Tarefas ──────────
   if (/aviso|lembrete|tarefa.*agendad|notificac/.test(q)) {
     const tasks = listActiveTasks();
-    if (tasks.length === 0) {
-      return "Voce nao tem avisos configurados. Posso configurar para voce! Exemplos:\n\n" +
-        "- \"Me avisa todo sabado o rendimento da semana\"\n" +
-        "- \"Todo dia me mostra o resumo de agendamentos\"\n" +
-        "- \"Me lembra todo dia 1 o faturamento do mes\"";
-    }
+    if (tasks.length === 0) return "Voce nao tem avisos configurados.";
     const lines = tasks.map((t, i) => `${i + 1}. ${formatTaskDescription(t)}`);
-    return `Voce tem **${tasks.length} aviso(s)** ativos:\n\n${lines.join("\n")}\n\nPara cancelar, diga \"cancela o aviso X\".`;
+    return `Voce tem **${tasks.length} aviso(s)** ativos:\n\n${lines.join("\n")}`;
   }
 
   const stats = getAppStats();
 
   // Faturamento
-  if (q.includes("faturamento") || q.includes("receita") || q.includes("faturei") || q.includes("ganhos")) {
-    if (q.includes("hoje")) {
-      const todayAppts = stats.todayAppts.filter(a => a.status !== "cancelled" && a.status !== "no_show");
-      const total = todayAppts.reduce((s, a) => s + (a.totalPrice ?? 0), 0);
-      return `Hoje voce tem R$ ${total.toFixed(2)} em agendamentos (${todayAppts.length} atendimentos). ${stats.currentCash ? "O caixa esta aberto." : "O caixa nao esta aberto ainda."}`;
-    }
-    return `Este mes: R$ ${stats.monthStats.totalRevenue.toFixed(2)} bruto, R$ ${stats.monthStats.netRevenue.toFixed(2)} liquido. ${stats.monthStats.count} atendimentos, ticket medio R$ ${stats.monthStats.avgTicket.toFixed(2)}.`;
-  }
-
-  // Agendamentos
-  if (q.includes("agendamento") || q.includes("agenda") || q.includes("hoje")) {
-    const total = stats.todayAppts.length;
-    const completed = stats.todayAppts.filter(a => a.status === "completed").length;
-    const inProgress = stats.todayAppts.filter(a => a.status === "in_progress").length;
-    return `Hoje: ${total} agendamento(s). ${completed} concluido(s), ${inProgress} em andamento, ${total - completed - inProgress} pendente(s).`;
-  }
-
-  // Clientes
-  if (q.includes("cliente") && (q.includes("quantos") || q.includes("total"))) {
-    return `Voce tem ${stats.clients.length} clientes cadastrados. ${stats.inactiveClients.length} estao inativos (sem visita ha 30+ dias).`;
-  }
-
-  // Funcionarios
-  if (q.includes("funcionario") || q.includes("equipe") || q.includes("time")) {
-    return `Equipe: ${stats.activeEmployees.length} funcionario(s) ativo(s) de ${stats.employees.length} total. ${stats.noCommission.length > 0 ? `${stats.noCommission.length} sem comissao configurada.` : "Todos com comissao configurada."}`;
-  }
-
-  // Servicos
-  if (q.includes("servico") && (q.includes("populares") || q.includes("mais"))) {
-    const { start, end } = getPeriodDates("mes");
-    const appts = getAppointmentsInPeriod(start, end);
-    const serviceCounts: Record<string, number> = {};
-    appts.forEach(a => {
-      (a.services ?? []).forEach(s => {
-        serviceCounts[s.name] = (serviceCounts[s.name] ?? 0) + 1;
-      });
-    });
-    const sorted = Object.entries(serviceCounts).sort(([, a], [, b]) => b - a).slice(0, 5);
-    if (sorted.length === 0) return "Nenhum servico foi realizado este mes ainda.";
-    return `Servicos mais populares este mes:\n${sorted.map(([name, count], i) => `${i + 1}. ${name} (${count}x)`).join("\n")}`;
-  }
-
-  // Caixa
-  if (q.includes("caixa")) {
-    if (stats.currentCash) {
-      const entries = stats.cashEntries.filter(e => e.sessionId === stats.currentCash!.id);
-      const total = entries.reduce((s, e) => s + e.amount, 0);
-      return `O caixa esta aberto desde ${new Date(stats.currentCash.openedAt).toLocaleTimeString("pt-BR")}. ${entries.length} lancamento(s), total R$ ${total.toFixed(2)} + saldo inicial R$ ${stats.currentCash.openingBalance.toFixed(2)}.`;
-    }
-    return "O caixa nao esta aberto no momento. Abra o caixa em Caixa para registrar pagamentos.";
-  }
-
-  // Cancelamentos
-  if (q.includes("cancelamento") || q.includes("no-show") || q.includes("falta")) {
-    return `Este mes: ${stats.cancelledThisMonth.length} cancelamentos/faltas. Taxa: ${stats.monthStats.cancelRate.toFixed(1)}%.`;
-  }
-
-  // Backup
-  if (q.includes("backup")) {
-    return `Va ate a secao Backup para exportar todos os seus dados em JSON. E recomendado fazer backup pelo menos 1x por semana. Voce tem ${stats.allAppts.length} agendamentos e ${stats.clients.length} clientes.`;
-  }
-
-  // Rendimento semanal / da semana (atalho comum)
-  if ((q.includes("rendimento") || q.includes("ganho") || q.includes("lucro")) && q.includes("semana")) {
-    if (q.includes("liquid") || q.includes("lucro")) {
-      return generateReport("rendimento_liquido", "semana");
-    }
-    return generateReport("rendimento_bruto", "semana");
-  }
-
-  // Ajuda geral
-  if (q.includes("ajuda") || q.includes("como") || q.includes("o que voce faz") || q.includes("funcionalidades")) {
-    return "Eu sou o assistente do Dominio Pro! Posso ajudar com:\n\n" +
-      "- **Informacoes**: \"quanto faturei hoje?\", \"quantos clientes tenho?\"\n" +
-      "- **Relatorios**: \"resumo da semana\", \"rendimento liquido do mes\"\n" +
-      "- **Avisos automaticos**: \"me avisa todo sabado o rendimento da semana\"\n" +
-      "- **Lembretes**: \"me lembra toda segunda de abrir o caixa\"\n" +
-      "- **Gerenciar agenda**: \"troque os agendamentos de Ana de segunda para sabado\"\n" +
-      "- **Cancelar**: \"cancela os agendamentos de amanha\"\n" +
-      "- **Dicas** de uso do app baseadas no seu comportamento\n" +
-      "- **Sugestoes** de melhorias para seu salao\n" +
-      "- **Navegar** ate funcionalidades especificas\n\n" +
-      "Experimente:\n" +
-      "- \"Troque os agendamentos de Ana Maria de segunda para sabado dia 2\"\n" +
-      "- \"Me avisa todo sabado o rendimento da semana\"\n" +
-      "- \"Resumo completo do mes\"";
-  }
-
-  // Como usar X
-  if (q.includes("como") && q.includes("agend")) {
-    return "Para criar um agendamento:\n1. Va ate a Agenda\n2. Clique em um horario vazio na coluna do funcionario\n3. Selecione o cliente, os servicos e horario\n4. Clique em Salvar\n\nDica: Voce pode arrastar agendamentos para reagendar!";
-  }
-
-  if (q.includes("como") && q.includes("import")) {
-    return "Para importar clientes:\n1. Va ate Ferramentas de Clientes\n2. Escolha o formato: CSV, Excel, JSON ou VCF (contatos do celular)\n3. Selecione o arquivo\n4. Confira o preview e confirme a importacao\n\nVoce tambem pode importar contatos direto do celular na pagina de Clientes!";
+  if (q.includes("faturamento") || q.includes("receita") || q.includes("faturei")) {
+    return `Este mes faturamos R$ ${stats.monthStats.totalRevenue.toFixed(2)}.`;
   }
 
   // Resposta generica
-  return "Entendi sua pergunta! Embora eu nao tenha uma resposta especifica, posso ajudar com informacoes sobre:\n\n" +
-    "- Faturamento e financeiro\n" +
-    "- Agendamentos de hoje\n" +
-    "- Seus clientes e funcionarios\n" +
-    "- Como usar funcionalidades do app\n" +
-    "- Sugestoes de melhoria\n\n" +
-    "Tente reformular ou me pergunte algo mais especifico!";
+  return "Posso ajudar com faturamento, agenda e gestao do salao. O que deseja fazer?";
 }
 
 // ─── Mensagem de boas-vindas ───────────────────────────────
@@ -720,30 +602,16 @@ export function getWelcomeMessage(): AgentMessage {
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Bom dia" : hour < 18 ? "Boa tarde" : "Boa noite";
 
-  let salonName = "seu salao";
-  try {
-    const raw = localStorage.getItem("salon_config");
-    if (raw) {
-      const cfg = JSON.parse(raw);
-      if (cfg.salonName && cfg.salonName !== "Salao Bella") salonName = cfg.salonName;
-    }
-  } catch { /* ignore */ }
-
   return {
     id: genId("welcome"),
     role: "agent",
-    content: `${greeting}! Sou o **Super Agente** do Dominio Pro. Gerencio seu salao inteiro por aqui!\n\nPosso fazer tudo pelo chat:\n\n**Clientes:** cadastrar, editar, excluir, buscar, ver historico, listar inativos e aniversariantes\n**Funcionarios:** cadastrar, editar, listar equipe e comissoes\n**Servicos:** cadastrar, editar, ver catalogo e mais populares\n**Caixa:** abrir, fechar, registrar pagamentos, consultar saldo\n**Navegacao:** "ir para agenda", "abrir relatorios"\n**Relatorios:** faturamento, resumo do dia/semana/mes\n**Avisos:** "me avisa todo sabado o rendimento\"\n**Agenda:** criar, mover e cancelar agendamentos\n\nExemplos:\n- \"Cadastrar cliente Maria Silva com telefone 11999887766\"\n- \"Abrir caixa com saldo inicial 200\"\n- \"Historico do cliente Joao\"\n- \"Listar servicos\"\n- \"Fechar caixa\"\n\nDigite o que precisa e eu resolvo!`,
+    content: `${greeting}! Sou o **Super Agente**. Posso gerenciar clientes, caixa, agenda e relatorios pelo chat. Como posso te ajudar hoje?`,
     timestamp: Date.now(),
   };
 }
 
 // ─── Processador de tarefas agendadas ──────────────────────
 
-/**
- * Verifica e processa tarefas agendadas que devem disparar.
- * Retorna mensagens do agente para cada tarefa disparada.
- * Deve ser chamado periodicamente pelo AgentChat.
- */
 export function processScheduledTasks(): AgentMessage[] {
   const dueTasks = checkDueTasks();
   const messages: AgentMessage[] = [];
@@ -751,60 +619,25 @@ export function processScheduledTasks(): AgentMessage[] {
   for (const task of dueTasks) {
     const reportContent = generateReport(task.reportType, task.periodScope);
     const content = `**Aviso agendado: ${task.label}**\n\n${reportContent}`;
-
-    // Salvar como notificacao
     addNotification(task.id, task.label, reportContent);
-
-    // Enviar notificacao do navegador
-    sendBrowserNotification(
-      `Dominio Pro — ${task.label}`,
-      reportContent.replace(/\*\*/g, "").substring(0, 120)
-    );
-
-    messages.push({
-      id: genId("scheduled"),
-      role: "agent",
-      content,
-      timestamp: Date.now(),
-    });
+    sendBrowserNotification(`Dominio Pro — ${task.label}`, reportContent.substring(0, 100));
+    messages.push({ id: genId("scheduled"), role: "agent", content, timestamp: Date.now() });
   }
-
   return messages;
 }
 
-/**
- * Retorna o numero de notificacoes nao lidas.
- */
 export function getUnreadCount(): number {
   return getUnreadNotifications().length;
 }
 
-// ─── Mensagem proativa ─────────────────────────────────────
-
 export function getProactiveSuggestion(): AgentMessage | null {
   const suggestions = generateSuggestions();
   if (suggestions.length === 0) return null;
-
-  // Pega a sugestao de maior prioridade
   const top = suggestions.sort((a, b) => b.priority - a.priority)[0];
-
-  return {
-    id: genId("proactive"),
-    role: "agent",
-    content: `**${top.title}**\n\n${top.message}`,
-    timestamp: Date.now(),
-    suggestions: [top],
-  };
+  return { id: genId("proactive"), role: "agent", content: `**${top.title}**\n\n${top.message}`, timestamp: Date.now(), suggestions: [top] };
 }
 
-// ─── Descarte de sugestao ──────────────────────────────────
-
 export { dismissSuggestion };
-
-// ─── Quick Actions e Templates (Super Agente) ─────────────
-
-export { getDynamicQuickActions, PHRASE_TEMPLATES };
-export type { DynamicQuickAction };
 
 /** Atualiza a pagina atual no contexto do agente */
 export function updateAgentPage(page: string): void {
@@ -818,15 +651,7 @@ function featureLabel(key: string): string {
     "dashboard": "Dashboard",
     "agenda": "Agenda",
     "clientes": "Clientes",
-    "funcionarios": "Funcionarios",
-    "servicos": "Servicos",
     "caixa": "Caixa",
-    "caixa/dashboard": "Dashboard Financeiro",
-    "relatorios": "Relatorios",
-    "historico": "Historico",
-    "backup": "Backup",
-    "configuracoes": "Configuracoes",
-    "ferramentas-clientes": "Ferramentas de Clientes",
   };
   return labels[key] ?? key;
-}
+                                                    }
