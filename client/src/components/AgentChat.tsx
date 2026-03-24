@@ -196,7 +196,7 @@ export default function AgentChat() {
       const errorMsg: AgentMessage = {
         id: `err_${Date.now()}`,
         role: "agent",
-        content: "Desculpe, tive um problema ao processar sua solicitação. Verifique sua conexão ou o token do GitHub.",
+        content: "Desculpe, tive um problema técnico ao processar sua mensagem. Por favor, tente novamente em instantes.",
         timestamp: Date.now(),
       };
       setMessages(prev => [...prev, errorMsg]);
