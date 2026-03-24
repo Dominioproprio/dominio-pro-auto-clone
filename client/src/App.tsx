@@ -62,13 +62,101 @@ function AppContent() {
             model: "openai/gpt-4o-mini",
             businessContext: "Domínio Pro - Sistema de gestão para barbearias e salões. Especializado em agendamentos, controle de caixa e relatórios.",
             llmAsFallback: true,
+
+            // ── Fornece dados reais do sistema para o LLM ──────────
             fetchSystemData: async (intent, entities) => {
-              console.log("IA solicitou dados:", intent, entities);
-              return "";
+              try {
+                const { useStore } = await import("./lib/store");
+                const state = useStore.getState();
+                const today = new Date().toISOString().split("T")[0];
+
+                if (intent.includes("agendamento") || intent.includes("agenda")) {
+                  const dateFilter = entities.date === "amanha"
+                    ? new Date(Date.now() + 86400000).toISOString().split("T")[0]
+                    : today;
+                  const appts = state.appointments.filter((a: any) =>
+                    !entities.date || entities.date === "semana"
+                      ? true
+                      : a.date === dateFilter
+                  );
+                  return `Agendamentos encontrados (${appts.length}): ${JSON.stringify(
+                    appts.slice(0, 10).map((a: any) => ({
+                      id: a.id, cliente: a.clientName, servico: a.serviceName,
+                      data: a.date, hora: a.time, status: a.status,
+                    }))
+                  )}`;
+                }
+
+                if (intent.includes("cliente")) {
+                  const q = entities.clientName?.toLowerCase() ?? "";
+                  const clients = q
+                    ? state.clients.filter((c: any) => c.name?.toLowerCase().includes(q))
+                    : state.clients.slice(0, 10);
+                  return `Clientes (${clients.length}): ${JSON.stringify(
+                    clients.map((c: any) => ({ id: c.id, nome: c.name, telefone: c.phone }))
+                  )}`;
+                }
+
+                if (intent.includes("servico")) {
+                  return `Serviços: ${JSON.stringify(
+                    state.services.map((s: any) => ({ id: s.id, nome: s.name, preco: s.price }))
+                  )}`;
+                }
+
+                if (intent.includes("financeiro") || intent.includes("relatorio")) {
+                  const caixa = state.cashEntries?.filter((e: any) => e.date === today) ?? [];
+                  const total = caixa.reduce((s: number, e: any) => s + (e.amount ?? 0), 0);
+                  return `Financeiro hoje: total R$ ${total.toFixed(2)}, lançamentos: ${caixa.length}`;
+                }
+
+                return "";
+              } catch (e) {
+                console.error("Erro ao buscar dados do sistema:", e);
+                return "";
+              }
             },
+
+            // ── Executa ações reais no sistema ──────────────────────
             executeToolAction: async (toolId, params) => {
-              console.log("IA executando ação:", toolId, params);
-              return "Ação processada no sistema.";
+              try {
+                const { useStore } = await import("./lib/store");
+                const state = useStore.getState();
+
+                if (toolId === "cancelar_agendamento") {
+                  const dateFilter = params.date ?? params.sourceDate;
+                  const clientFilter = params.clientName?.toLowerCase();
+                  const targets = state.appointments.filter((a: any) => {
+                    const matchDate = dateFilter ? a.date === dateFilter : true;
+                    const matchClient = clientFilter
+                      ? a.clientName?.toLowerCase().includes(clientFilter)
+                      : true;
+                    return matchDate && matchClient && a.status !== "cancelado";
+                  });
+                  if (targets.length === 0) return "Nenhum agendamento encontrado para cancelar.";
+                  for (const appt of targets) {
+                    await state.updateAppointment(appt.id, { status: "cancelado" });
+                  }
+                  return `${targets.length} agendamento(s) cancelado(s) com sucesso.`;
+                }
+
+                if (toolId === "mover_agendamento" || toolId === "reagendar") {
+                  const appt = state.appointments.find((a: any) =>
+                    a.date === params.sourceDate &&
+                    (!params.clientName || a.clientName?.toLowerCase().includes(params.clientName.toLowerCase()))
+                  );
+                  if (!appt) return "Agendamento de origem não encontrado.";
+                  await state.updateAppointment(appt.id, {
+                    date: params.targetDate ?? appt.date,
+                    time: params.targetTime ?? appt.time,
+                  });
+                  return `Agendamento reagendado para ${params.targetDate ?? appt.date} às ${params.targetTime ?? appt.time}.`;
+                }
+
+                return "Ação reconhecida, mas não implementada para este tipo.";
+              } catch (e) {
+                console.error("Erro ao executar ação:", e);
+                return "Erro ao executar a ação no sistema.";
+              }
             },
           });
         } catch (e) {
