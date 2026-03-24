@@ -419,7 +419,7 @@ const PHONE_PATTERN = /(?:\(?\d{2}\)?\s*)?(?:9\s?)?\d{4}[-.\s]?\d{4}/;
 const EMAIL_PATTERN = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 const CPF_PATTERN = /\d{3}\.?\d{3}\.?\d{3}-?\d{2}/;
 const MONEY_PATTERN = /(?:R\$\s*)?(\d{1,}[.,]?\d{0,2})/;
-const TIME_PATTERN = /(?:(?:as?\s+)?(\d{1,2}):(\d{2})|(?:as?\s+)?(\d{1,2})\s*h\s*(\d{2})?|(?:as?\s+)?(\d{1,2})\s*horas?(?:\s+da\s+(manha|tarde|noite))?)/;
+const TIME_PATTERN = /(?:(?:as?\s+)?(\d{1,2}):(\d{2})|(?:as?\s+)?(\d{1,2})\s*h\s*(\d{2})?|(?:as?\s+)?(\d{1,2})\s*horas?(?:\s+da\s+(manha|tarde|noite))?|as?\s+(\d{1,2})\s(\d{2})(?:\s|$))/;
 const DATE_PATTERN = /(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2,4}))?/;
 
 /** Extrai nome próprio de texto (heurística: palavra com inicial maiúscula) */
@@ -527,11 +527,11 @@ export function extractEntities(text: string): ExtractedEntities {
   const moneyMatch = q.match(MONEY_PATTERN);
   if (moneyMatch) entities.valor = moneyMatch[1].replace(",", ".");
 
-  // Hora
-  const timeMatch = q.match(TIME_PATTERN);
+  // Hora — tentar primeiro no texto original (preserva ":"), depois no normalizado
+  const timeMatch = text.toLowerCase().match(TIME_PATTERN) ?? q.match(TIME_PATTERN);
   if (timeMatch) {
-    let h = parseInt(timeMatch[1] ?? timeMatch[3] ?? timeMatch[5], 10);
-    const m = parseInt(timeMatch[2] ?? timeMatch[4] ?? "0", 10);
+    let h = parseInt(timeMatch[1] ?? timeMatch[3] ?? timeMatch[5] ?? timeMatch[7], 10);
+    const m = parseInt(timeMatch[2] ?? timeMatch[4] ?? timeMatch[8] ?? "0", 10);
     // Ajustar "da tarde" / "da noite"
     const period = timeMatch[6];
     if (period === "tarde" && h < 12) h += 12;
@@ -732,4 +732,5 @@ export function fuzzyMatch(input: string, target: string, threshold = 0.7): bool
   const similarity = 1 - distance / maxLen;
   return similarity >= threshold;
 }
+
 
