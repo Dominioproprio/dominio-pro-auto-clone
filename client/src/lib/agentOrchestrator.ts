@@ -482,6 +482,10 @@ async function handleActionIntent(
       }
     }
 
+    // Preservar entidades extras (clientId, serviceId) para validação posterior
+    if (entities.clientId) filledSlots.clientId = entities.clientId;
+    if (entities.serviceId) filledSlots.serviceId = entities.serviceId;
+
     startSlotFilling(intent, intent, filledSlots, missingSlots);
 
     // Perguntar o primeiro parâmetro faltante
@@ -833,8 +837,16 @@ async function handleSlotFillingResponse(
   text: string,
   slotState: SlotFillingState,
 ): Promise<AgentResponse> {
-  // Verificar se o usuário quer cancelar o fluxo
   const q = normalize(text);
+
+  // Verificar se o usuário está iniciando um novo pedido (não respondendo ao slot)
+  if (/\b(agend[ae]|marc[ae]|quero\s+marcar|preciso\s+marcar|reserv[ae])\b/.test(q)) {
+    clearSlotFilling();
+    // Re-processar como nova mensagem
+    return await handleUserMessage(text);
+  }
+
+  // Verificar se o usuário quer cancelar o fluxo
   if (/\b(cancela|cancelar|deixa|para|esquece|desiste)\b/.test(q)) {
     clearSlotFilling();
     addUserTurn(text, "negar", {});
