@@ -25,7 +25,7 @@ import { getSession, isAccessControlEnabled, canAccess, getDefaultRoute } from "
 import ProfileSelector from "./components/ProfileSelector";
 import AgentChat from "./components/AgentChat";
 
-// --- IMPORTAÇÃO DO AGENTE (CORRIGIDA PARA PASTA LIB) ---
+// --- IMPORTAÃ‡ÃƒO DO AGENTE (CORRIGIDA PARA PASTA LIB) ---
 import { initAgent } from "./lib/agentOrchestrator";
 
 function getAccent() {
@@ -46,12 +46,12 @@ function AppContent() {
   const [accessEnabled, setAccessEnabled] = useState(isAccessControlEnabled);
   const [session, setSession]             = useState(getSession);
 
-  // ── INICIALIZAÇÃO DO AGENTE IA (ETAPA 2b) ──
+  // â”€â”€ INICIALIZAÃ‡ÃƒO DO AGENTE IA (ETAPA 2b) â”€â”€
   useEffect(() => {
     const setupIA = async () => {
       let token = localStorage.getItem("github_token");
       if (!token) {
-        token = prompt("🤖 Bem-vindo! Cole seu GitHub Token (PAT) para ativar a IA:");
+        token = prompt("ðŸ¤– Bem-vindo! Cole seu GitHub Token (PAT) para ativar a IA:");
         if (token) localStorage.setItem("github_token", token);
       }
 
@@ -60,9 +60,9 @@ function AppContent() {
           await initAgent({
             githubToken: token,
             model: "openai/gpt-4o-mini",
-            businessContext: "Domínio Pro - Sistema de gestão para barbearias e salões. Especializado em agendamentos, controle de caixa e relatórios.",
+            businessContext: "DomÃ­nio Pro - Sistema de gestÃ£o para barbearias e salÃµes. Especializado em agendamentos, controle de caixa e relatÃ³rios.",
             llmAsFallback: true,
-            // ── Fornece dados reais do sistema para o LLM ──────────
+            // â”€â”€ Fornece dados reais do sistema para o LLM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             fetchSystemData: async (intent, entities) => {
               try {
                 const {
@@ -78,7 +78,10 @@ function AppContent() {
                   let dateFilter = today;
                   if (entities.date === "amanha") {
                     dateFilter = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+                  } else if (entities.date && /^\d{4}-\d{2}-\d{2}$/.test(entities.date)) {
+                    dateFilter = entities.date;
                   }
+                  
                   const appts = entities.date === "semana"
                     ? appointmentsStore.list()
                     : appointmentsStore.list({ date: dateFilter });
@@ -89,7 +92,7 @@ function AppContent() {
                       data: a.startTime.split("T")[0],
                       hora: a.startTime.split("T")[1]?.slice(0, 5),
                       status: a.status,
-                      servicos: a.services?.map(s => s.serviceName).join(", "),
+                      servicos: a.services?.map(s => s.name).join(", "),
                     }))
                   )}`;
                 }
@@ -124,7 +127,7 @@ function AppContent() {
               }
             },
 
-            // ── Executa acoes reais no sistema ──────────────────────
+            // â”€â”€ Executa acoes reais no sistema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             executeToolAction: async (toolId, params) => {
               try {
                 const {
@@ -134,14 +137,28 @@ function AppContent() {
                   employeesStore,
                 } = await import("./lib/store");
 
+                // Helper para normalizar horÃ¡rio
+                const normalizeTime = (raw: string) => {
+                  if (!raw) return null;
+                  let t = raw.toLowerCase().replace(/h/i, ":").replace(/\s+/g, "").trim();
+                  // Formatos: "9", "09", "9:30", "09:30"
+                  if (/^\d{1,2}$/.test(t)) t = `${t.padStart(2, '0')}:00`;
+                  if (/^\d{1,2}:\d{2}$/.test(t)) {
+                    const [h, m] = t.split(":");
+                    return `${h.padStart(2, '0')}:${m}`;
+                  }
+                  return null;
+                };
+
                 if (toolId === "agendar") {
                   const clientName = params.clientName ?? params.client ?? "Cliente";
                   const serviceName = params.serviceName ?? params.service ?? params.servico ?? "Servico";
+                  const employeeName = params.employeeName ?? params.funcionario ?? params.profissional;
                   const dateRaw = params.date ?? params.data;
                   const timeRaw = params.time ?? params.horario ?? params.hora;
 
                   if (!dateRaw || !timeRaw) {
-                    return `Faltam informacoes: ${!dateRaw ? "data " : ""}${!timeRaw ? "horario" : ""}`.trim();
+                    return `Faltam informaÃ§Ãµes: ${!dateRaw ? "data " : ""}${!timeRaw ? "horÃ¡rio" : ""}`.trim();
                   }
 
                   let resolvedDate = dateRaw;
@@ -151,12 +168,12 @@ function AppContent() {
                     resolvedDate = new Date(Date.now() + 86400000).toISOString().split("T")[0];
                   }
 
-                  let resolvedTime = timeRaw.replace(/h/i, ":").trim();
-                  if (/^\d{1,2}$/.test(resolvedTime)) resolvedTime = `${resolvedTime}:00`;
-                  if (!/^\d{1,2}:\d{2}$/.test(resolvedTime)) resolvedTime = "09:00";
+                  const resolvedTime = normalizeTime(timeRaw);
+                  if (!resolvedTime) {
+                    return `HorÃ¡rio "${timeRaw}" invÃ¡lido. Por favor, use o formato HH:MM (ex: 14:30).`;
+                  }
 
-                  const services = servicesStore.list();
-                  // Buscar serviço pelo serviceId (passado pelo orchestrator) ou por nome
+                  const services = servicesStore.list(true);
                   const svc = params.serviceId
                     ? services.find(s => String(s.id) === String(params.serviceId))
                     : services.find(s =>
@@ -166,20 +183,45 @@ function AppContent() {
 
                   if (!svc) {
                     const available = services.map(s => s.name).join(", ");
-                    return `Serviço "${serviceName}" não encontrado. Serviços disponíveis: ${available || "nenhum cadastrado"}`;
+                    return `ServiÃ§o "${serviceName}" nÃ£o encontrado. ServiÃ§os disponÃ­veis: ${available || "nenhum cadastrado"}`;
                   }
 
                   const employees = employeesStore.list(true);
-                  if (employees.length === 0) return "Nenhum funcionario cadastrado.";
-                  const emp = employees[0];
+                  if (employees.length === 0) return "Nenhum funcionÃ¡rio ativo cadastrado.";
+                  
+                  let emp = employees[0];
+                  if (employeeName) {
+                    const foundEmp = employees.find(e => e.name.toLowerCase().includes(employeeName.toLowerCase()));
+                    if (foundEmp) emp = foundEmp;
+                    else return `FuncionÃ¡rio "${employeeName}" nÃ£o encontrado ou inativo.`;
+                  } else if (employees.length > 1) {
+                    // Se houver mais de um e nÃ£o especificou, poderÃ­amos pedir para escolher, 
+                    // mas para manter o fluxo, vamos avisar qual foi selecionado ou pedir definiÃ§Ã£o.
+                    // O relatÃ³rio sugere perguntar se houver mais de um.
+                    return `Por favor, especifique o profissional. Profissionais disponÃ­veis: ${employees.map(e => e.name).join(", ")}`;
+                  }
 
-                  const durationMs = (svc?.durationMinutes ?? 60) * 60 * 1000;
+                  const durationMs = (svc.durationMinutes ?? 60) * 60 * 1000;
                   const startTime = `${resolvedDate}T${resolvedTime}:00`;
-                  const endTime = new Date(new Date(startTime).getTime() + durationMs)
-                    .toISOString().slice(0, 16) + ":00";
+                  const startDt = new Date(startTime);
+                  const endDt = new Date(startDt.getTime() + durationMs);
+                  const endTime = endDt.toISOString().slice(0, 16) + ":00";
+
+                  // VerificaÃ§Ã£o de conflito de horÃ¡rio
+                  const existing = appointmentsStore.list({ date: resolvedDate }).filter(a => a.employeeId === emp.id && a.status !== 'cancelled');
+                  const hasConflict = existing.some(a => {
+                    const aStart = new Date(a.startTime).getTime();
+                    const aEnd = new Date(a.endTime).getTime();
+                    const reqStart = startDt.getTime();
+                    const reqEnd = endDt.getTime();
+                    return (reqStart < aEnd && reqEnd > aStart);
+                  });
+
+                  if (hasConflict) {
+                    return `O profissional ${emp.name} jÃ¡ possui um agendamento nesse horÃ¡rio (${resolvedTime}). Por favor, escolha outro horÃ¡rio ou profissional.`;
+                  }
 
                   const allClients = clientsStore.list();
-                  // Usar clientId já resolvido pelo orchestrator, ou buscar por nome
                   const foundClient = params.clientId
                     ? allClients.find(c => String(c.id) === String(params.clientId))
                     : allClients.find(c => c.name?.toLowerCase().includes(clientName.toLowerCase()));
@@ -197,7 +239,7 @@ function AppContent() {
                     groupId: null,
                     services: [{
                       serviceId: svc.id,
-                      serviceName: svc.name,
+                      name: svc.name,
                       price: svc.price,
                       durationMinutes: svc.durationMinutes,
                       employeeId: emp.id,
@@ -205,7 +247,7 @@ function AppContent() {
                   });
 
                   window.dispatchEvent(new Event("store_updated"));
-                  return `Agendamento criado!\nCliente: ${foundClient?.name ?? clientName}\nServico: ${svc.name}\nData: ${resolvedDate} as ${resolvedTime}\nFuncionario: ${emp.name}`;
+                  return `Agendamento criado com sucesso!\nCliente: ${foundClient?.name ?? clientName}\nServiÃ§o: ${svc.name}\nData: ${resolvedDate} Ã s ${resolvedTime}\nProfissional: ${emp.name}`;
                 }
 
                 if (toolId === "cancelar_agendamento") {
@@ -215,48 +257,79 @@ function AppContent() {
                   else if (dateRaw === "amanha") {
                     resolvedDate = new Date(Date.now() + 86400000).toISOString().split("T")[0];
                   }
+                  
                   const clientFilter = params.clientName?.toLowerCase();
                   const targets = appointmentsStore.list(resolvedDate ? { date: resolvedDate } : undefined).filter(a => {
                     const matchClient = clientFilter ? a.clientName?.toLowerCase().includes(clientFilter) : true;
                     return matchClient && a.status !== "cancelled";
                   });
+
                   if (targets.length === 0) return "Nenhum agendamento encontrado para cancelar.";
+                  
+                  if (targets.length > 1 && !params.confirmed) {
+                    const list = targets.map(a => `- ${a.clientName} Ã s ${a.startTime.split('T')[1].slice(0,5)} (${a.services?.map(s => s.name).join(', ')})`).join('\n');
+                    return `Encontrei mÃºltiplos agendamentos. Qual deseja cancelar?\n${list}\n(Por favor, seja mais especÃ­fico com o horÃ¡rio ou nome)`;
+                  }
+
                   for (const appt of targets) {
                     await appointmentsStore.update(appt.id, { status: "cancelled" });
                   }
                   window.dispatchEvent(new Event("store_updated"));
-                  return `${targets.length} agendamento(s) cancelado(s).`;
+                  return `${targets.length} agendamento(s) cancelado(s) com sucesso.`;
                 }
 
                 if (toolId === "mover_agendamento" || toolId === "reagendar") {
                   const srcDate = params.sourceDate === "hoje"
                     ? new Date().toISOString().split("T")[0]
-                    : params.sourceDate;
-                  const appts = appointmentsStore.list(srcDate ? { date: srcDate } : undefined);
-                  const appt = appts.find(a =>
-                    !params.clientName || a.clientName?.toLowerCase().includes(params.clientName.toLowerCase())
+                    : (params.sourceDate ?? params.date);
+                  
+                  const clientFilter = params.clientName?.toLowerCase();
+                  const appts = appointmentsStore.list(srcDate ? { date: srcDate } : undefined).filter(a => 
+                    a.status !== 'cancelled' && (!clientFilter || a.clientName?.toLowerCase().includes(clientFilter))
                   );
-                  if (!appt) return "Agendamento de origem nao encontrado.";
 
+                  if (appts.length === 0) return "Agendamento de origem nÃ£o encontrado.";
+                  
+                  if (appts.length > 1 && !params.confirmed) {
+                    const list = appts.map(a => `- ${a.clientName} Ã s ${a.startTime.split('T')[1].slice(0,5)}`).join('\n');
+                    return `Encontrei mais de um agendamento para este cliente/data. Qual deseja mover?\n${list}`;
+                  }
+
+                  const appt = appts[0];
                   const tgtDate = params.targetDate === "amanha"
                     ? new Date(Date.now() + 86400000).toISOString().split("T")[0]
-                    : (params.targetDate ?? appt.startTime.split("T")[0]);
-                  let tgtTime = (params.targetTime ?? params.time ?? appt.startTime.split("T")[1]?.slice(0, 5) ?? "09:00")
-                    .replace(/h/i, ":").trim();
-                  if (/^\d{1,2}$/.test(tgtTime)) tgtTime = `${tgtTime}:00`;
+                    : (params.targetDate ?? params.date ?? appt.startTime.split("T")[0]);
+                  
+                  const tgtTime = normalizeTime(params.targetTime ?? params.time ?? appt.startTime.split("T")[1]?.slice(0, 5));
+                  if (!tgtTime) return "HorÃ¡rio de destino invÃ¡lido.";
 
                   const durationMs = new Date(appt.endTime).getTime() - new Date(appt.startTime).getTime();
                   const newStart = `${tgtDate}T${tgtTime}:00`;
                   const newEnd = new Date(new Date(newStart).getTime() + durationMs).toISOString().slice(0, 19);
+                  
+                  // Verificar conflito no destino
+                  const existing = appointmentsStore.list({ date: tgtDate }).filter(a => a.employeeId === appt.employeeId && a.id !== appt.id && a.status !== 'cancelled');
+                  const hasConflict = existing.some(a => {
+                    const aStart = new Date(a.startTime).getTime();
+                    const aEnd = new Date(a.endTime).getTime();
+                    const reqStart = new Date(newStart).getTime();
+                    const reqEnd = new Date(newEnd).getTime();
+                    return (reqStart < aEnd && reqEnd > aStart);
+                  });
+
+                  if (hasConflict) {
+                    return `NÃ£o foi possÃ­vel mover: o profissional jÃ¡ tem um agendamento em ${tgtDate} Ã s ${tgtTime}.`;
+                  }
+
                   await appointmentsStore.update(appt.id, { startTime: newStart, endTime: newEnd });
                   window.dispatchEvent(new Event("store_updated"));
-                  return `Agendamento reagendado para ${tgtDate} as ${tgtTime}.`;
+                  return `Agendamento reagendado com sucesso para ${tgtDate} Ã s ${tgtTime}.`;
                 }
 
-                return "Acao reconhecida, mas nao implementada.";
+                return "AÃ§Ã£o reconhecida, mas nÃ£o implementada.";
               } catch (e) {
                 console.error("[executeToolAction] Erro:", e);
-                return `Erro ao executar a acao: ${e instanceof Error ? e.message : String(e)}`;
+                return `Erro ao executar a aÃ§Ã£o: ${e instanceof Error ? e.message : String(e)}`;
               }
             },
           });
@@ -295,7 +368,7 @@ function AppContent() {
           const opened = await autoOpenCashIfNeeded();
           if (opened) {
             toast.success("Caixa aberto automaticamente para hoje!", {
-              description: "Configure em Configurações > Automação",
+              description: "Configure em ConfiguraÃ§Ãµes > AutomaÃ§Ã£o",
               duration: 5000,
             });
           }
@@ -305,7 +378,7 @@ function AppContent() {
       })
       .catch(err => {
         console.error("Erro ao carregar dados:", err);
-        setError("Não foi possível conectar ao banco de dados.");
+        setError("NÃ£o foi possÃ­vel conectar ao banco de dados.");
         setLoading(false);
       });
   }, []);
@@ -327,7 +400,7 @@ function AppContent() {
           <div className="w-6 h-6 rounded-full border-2 border-t-transparent animate-spin"
             style={{ borderColor: accent, borderTopColor: "transparent" }} />
         </div>
-        <p className="text-sm text-white/30">Carregando Domínio Pro...</p>
+        <p className="text-sm text-white/30">Carregando DomÃ­nio Pro...</p>
       </div>
     </div>
   );
@@ -335,8 +408,8 @@ function AppContent() {
   if (error) return (
     <div className="flex items-center justify-center h-screen p-6" style={{ background: "#08080f" }}>
       <div className="text-center space-y-4 max-w-md">
-        <div className="text-4xl">⚠️</div>
-        <h2 className="text-lg font-bold text-red-400">Erro de conexão</h2>
+        <div className="text-4xl">âš ï¸</div>
+        <h2 className="text-lg font-bold text-red-400">Erro de conexÃ£o</h2>
         <p className="text-sm text-white/50">{error}</p>
         <button onClick={() => window.location.reload()}
           className="px-4 py-2 rounded-xl text-sm font-semibold text-white"
