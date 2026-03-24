@@ -9,8 +9,8 @@ import {
   Mic, Volume2, VolumeX, ThumbsUp, ThumbsDown, HelpCircle,
 } from "lucide-react";
 
-// --- IMPORTAÇÃO DO NOVO ORQUESTRADOR ---
-import { handleUserMessage } from "../agentOrchestrator";
+// --- IMPORTAÇÃO DO NOVO ORQUESTRADOR (CORRIGIDA PARA PASTA LIB) ---
+import { handleUserMessage } from "../lib/agentOrchestrator";
 
 import { trackPageVisit, trackAction, initTracker } from "@/lib/agentTracker";
 import {
