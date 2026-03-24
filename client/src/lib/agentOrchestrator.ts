@@ -740,15 +740,69 @@ async function handleSlotFillingResponse(
     return await handleActionIntent(slotState.flowId, slotState.filledSlots, text, "nlu", 0.9);
   }
 
-  // Preencher o próximo slot
-  const [slotName] = missingEntries[0];
+  // Validar se a resposta bate com o tipo de slot esperado
+  const [slotName, slotPrompt] = missingEntries[0];
+
+  // Se está esperando um horário mas recebeu algo que não parece hora → repetir pergunta
+  if ((slotName === "time" || slotName === "targetTime") && !/\d/.test(text)) {
+    const msg = `Não entendi o horário. Por favor, informe no formato "14h" ou "14:00".`;
+    addUserTurn(text, slotState.flowId, {});
+    addAgentTurn(msg, slotState.flowId);
+    return {
+      text: msg,
+      intent: slotState.flowId,
+      entities: { ...slotState.filledSlots },
+      actionExecuted: false,
+      awaitingConfirmation: false,
+      awaitingInput: true,
+      missingParam: slotName,
+      source: "nlu",
+      confidence: 0.9,
+    };
+  }
+
+  // Se está esperando data mas recebeu algo que não parece data → repetir pergunta
+  if ((slotName === "date" || slotName === "sourceDate" || slotName === "targetDate") &&
+      !/\d|hoje|amanha|amanhã|segunda|terca|quarta|quinta|sexta|sabado|domingo|proxim|semana/i.test(text)) {
+    const msg = `Não entendi a data. Pode informar assim: "hoje", "amanhã" ou "25/06"?`;
+    addUserTurn(text, slotState.flowId, {});
+    addAgentTurn(msg, slotState.flowId);
+    return {
+      text: msg,
+      intent: slotState.flowId,
+      entities: { ...slotState.filledSlots },
+      actionExecuted: false,
+      awaitingConfirmation: false,
+      awaitingInput: true,
+      missingParam: slotName,
+      source: "nlu",
+      confidence: 0.9,
+    };
+  }
+
+  // Preencher o slot com a resposta do usuário
   const remaining = fillSlot(slotName, text);
 
   addUserTurn(text, slotState.flowId, { [slotName]: text });
 
   if (Object.keys(remaining).length > 0) {
     const nextEntry = Object.entries(remaining)[0];
-    const promptText = nextEntry[1];
+    const [nextSlotName, nextSlotPrompt] = nextEntry;
+
+    // Gerar prompt contextual com o que já foi coletado
+    let promptText = nextSlotPrompt as string;
+    if (isLLMConfigured() && agentConfig) {
+      try {
+        const filled = { ...slotState.filledSlots, [slotName]: text };
+        const filledDesc = Object.entries(filled).map(([k, v]) => `${k}="${v}"`).join(", ");
+        promptText = await generateResponse(
+          `Coletando dados para "${slotState.flowId}". Já temos: ${filledDesc}. Agora precisa de "${nextSlotName}". Pergunta curta e natural:`,
+          undefined,
+          agentConfig.businessContext,
+        );
+      } catch { /* usar prompt padrão */ }
+    }
+
     addAgentTurn(promptText, slotState.flowId);
 
     return {
@@ -758,7 +812,7 @@ async function handleSlotFillingResponse(
       actionExecuted: false,
       awaitingConfirmation: false,
       awaitingInput: true,
-      missingParam: nextEntry[0],
+      missingParam: nextSlotName,
       source: "nlu",
       confidence: 0.9,
     };
