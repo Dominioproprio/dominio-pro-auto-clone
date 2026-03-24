@@ -199,24 +199,29 @@ export async function handleUserMessage(userMessage: string): Promise<AgentRespo
     agentConfig?.alwaysUseLLM ||
     (confidence < 0.6 && isLLMConfigured() && agentConfig?.llmAsFallback !== false);
 
+  let llmError: string | null = null;
   if (shouldUseLLM && isLLMConfigured()) {
     try {
       const llmResult = await classifyIntent(trimmed);
-      if (llmResult.confidence > confidence) {
+      // Só usa o LLM se ele tiver uma confiança razoável e maior que a local
+      if (llmResult.confidence > confidence && llmResult.confidence > 0.3) {
         intent = llmResult.intent;
-        entities = llmResult.entities;
+        entities = { ...entities, ...llmResult.entities };
         confidence = llmResult.confidence;
         source = "llm";
       }
     } catch (err) {
-      console.warn("[agentOrchestrator] LLM classification failed, using local:", err);
-      // Se o LLM falhar e a confiança local for muito baixa, avisar o usuário
-      if (confidence < 0.3) {
-        return makeResponse(
-          "Desculpe, tive um problema temporário para entender sua solicitação. Pode tentar de novo com outras palavras?",
-          "erro_compreensao", {}, "fallback", 0
-        );
-      }
+      console.warn("[agentOrchestrator] LLM classification failed, using local NLU:", err);
+      llmError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  // Se após tentar LLM a confiança ainda for muito baixa, mas temos um comando claro,
+  // podemos forçar a intenção se certas palavras-chave estiverem presentes
+  if (confidence < 0.4 && (trimmed.toLowerCase().includes("agenda") || trimmed.toLowerCase().includes("marca"))) {
+    if (intent === "outro") {
+      intent = "agendar";
+      confidence = 0.5;
     }
   }
 
@@ -232,6 +237,12 @@ export async function handleUserMessage(userMessage: string): Promise<AgentRespo
     response = await handleActionIntent(intent, entities, trimmed, source, confidence);
   } else {
     response = await handleConversationalIntent(intent, entities, trimmed, source, confidence);
+  }
+
+  // Adicionar feedback sobre dificuldades técnicas se houver
+  if (llmError && response.source !== "llm") {
+    const feedback = `\n\n*(Nota: Estou operando em modo simplificado pois tive uma dificuldade técnica com minha IA: ${llmError})*`;
+    response.text += feedback;
   }
 
   addAgentTurn(response.text, intent);
@@ -522,9 +533,11 @@ async function handleSlotFillingResponse(text: string, slotState: SlotFillingSta
         slotState.filledSlots.clientId = String(resolved.id);
       } else {
         const clients = clientsStore.list();
-        let msg = `Cliente "${text}" não encontrado.`;
+        let msg = `Não consegui encontrar o cliente "${text}" no sistema.`;
         if (clients.length > 0 && clients.length <= 15) {
-          msg += ` Clientes cadastrados: ${clients.map(c => c.name).join(", ")}`;
+          msg += ` Os clientes que tenho cadastrados são: ${clients.map(c => c.name).join(", ")}. Pode confirmar o nome?`;
+        } else {
+          msg += ` Pode conferir se o nome está correto ou se ele já está cadastrado?`;
         }
         addUserTurn(text, slotState.flowId, {});
         addAgentTurn(msg, slotState.flowId);
@@ -547,9 +560,11 @@ async function handleSlotFillingResponse(text: string, slotState: SlotFillingSta
         slotState.filledSlots.serviceId = String(resolved.id);
       } else {
         const services = servicesStore.list(true);
-        let msg = `Serviço "${text}" não encontrado.`;
+        let msg = `Ainda não tenho o serviço "${text}" cadastrado.`;
         if (services.length > 0) {
-          msg += ` Serviços disponíveis: ${services.map(s => `${s.name} (R$${s.price})`).join(", ")}`;
+          msg += ` Atualmente oferecemos: ${services.map(s => `${s.name} (R$${s.price})`).join(", ")}. Qual deles você deseja?`;
+        } else {
+          msg += ` Parece que não há serviços ativos no momento.`;
         }
         addUserTurn(text, slotState.flowId, {});
         addAgentTurn(msg, slotState.flowId);
