@@ -117,6 +117,22 @@ export default function AgentChat() {
     const step = getOnboardingStep();
     setOnboardingStepState(step);
     setInitialized(true);
+
+    // ── LOOP DE VERIFICAÇÃO DE TAREFAS AGENDADAS ──────────
+    const schedulerInterval = setInterval(() => {
+      const scheduledMsgs = processScheduledTasks();
+      if (scheduledMsgs.length > 0) {
+        setMessages(prev => {
+          const next = [...prev, ...scheduledMsgs];
+          saveMessages(next);
+          return next;
+        });
+        setHasNewMessage(true);
+        setUnreadCount(getUnreadCount());
+      }
+    }, 60_000); // verifica a cada 1 minuto
+
+    return () => clearInterval(schedulerInterval);
   }, [initialized]);
 
   useEffect(() => {
