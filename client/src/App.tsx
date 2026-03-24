@@ -21,9 +21,12 @@ import FerramentasClientesPage from "./pages/FerramentasClientesPage";
 import { useState, useEffect, useCallback } from "react";
 import { toast } from "sonner";
 import { fetchAllData, autoOpenCashIfNeeded } from "./lib/store";
-import { getSession, clearSession, canAccess, getDefaultRoute, isAccessControlEnabled } from "./lib/access";
+import { getSession, isAccessControlEnabled, canAccess, getDefaultRoute } from "./lib/access";
 import ProfileSelector from "./components/ProfileSelector";
 import AgentChat from "./components/AgentChat";
+
+// --- IMPORTAÇÃO DO AGENTE (PASSO 2b) ---
+import { initAgent } from "./agentOrchestrator";
 
 function getAccent() {
   try {
@@ -40,11 +43,49 @@ function AppContent() {
   const [location]                = useLocation();
   const accent = getAccent();
 
-  // ── Controle de acesso — todos os hooks ANTES de qualquer return ──
   const [accessEnabled, setAccessEnabled] = useState(isAccessControlEnabled);
   const [session, setSession]             = useState(getSession);
 
-  // Revalida quando salon_config muda
+  // ── INICIALIZAÇÃO DO AGENTE IA (ETAPA 2b) ──
+  useEffect(() => {
+    const setupIA = async () => {
+      // Recupera o token de forma segura (Opção B do guia)
+      let token = localStorage.getItem("github_token");
+      if (!token) {
+        token = prompt("🤖 Bem-vindo! Cole seu GitHub Token (PAT) para ativar a IA:");
+        if (token) localStorage.setItem("github_token", token);
+      }
+
+      if (token) {
+        try {
+          await initAgent({
+            githubToken: token,
+            model: "openai/gpt-4o-mini", // Recomendado pelo guia
+            businessContext: "Domínio Pro - Sistema de gestão para barbearias e salões. Especializado em agendamentos, controle de caixa e relatórios.",
+            llmAsFallback: true, //
+
+            // Integração com os dados do seu sistema
+            fetchSystemData: async (intent, entities) => {
+              console.log("IA solicitou dados:", intent, entities);
+              // Exemplo: Integrar com fetchAllData ou stores específicos no futuro
+              return "";
+            },
+
+            // Execução de ferramentas na agenda
+            executeToolAction: async (toolId, params) => {
+              console.log("IA executando ação:", toolId, params);
+              return "Ação processada no sistema.";
+            },
+          });
+        } catch (e) {
+          console.error("Erro ao inicializar Agente IA:", e);
+        }
+      }
+    };
+
+    setupIA();
+  }, []);
+
   useEffect(() => {
     const onUpdate = () => {
       setAccessEnabled(isAccessControlEnabled());
@@ -58,14 +99,12 @@ function AppContent() {
     };
   }, []);
 
-  // Redireciona se rota bloqueada (via useEffect para não atualizar durante render)
   useEffect(() => {
     if (session && accessEnabled && !canAccess(session.role, location)) {
       setLocation(getDefaultRoute(session.role));
     }
   }, [session, accessEnabled, location, setLocation]);
 
-  // Carrega dados do Supabase
   useEffect(() => {
     fetchAllData()
       .then(async () => {
@@ -94,9 +133,6 @@ function AppContent() {
     setTimeout(() => window.dispatchEvent(new CustomEvent("dominio:open_new_appt")), 100);
   }, [setLocation]);
 
-  // ── Renderização condicional APÓS todos os hooks ──
-
-  // Se controle ativado e sem sessão → mostrar seletor de perfil
   if (!loading && accessEnabled && !session) {
     return <ProfileSelector />;
   }
