@@ -59,7 +59,7 @@ import {
 
 import { isScheduleCommand, processCommand } from "./agentCommands";
 import { extractEntities as extractNLUEntities } from "./agentNLU";
-import { servicesStore } from "./store";
+import { servicesStore, clientsStore, appointmentsStore } from "./store";
 
 // ─── Tipos ─────────────────────────────────────────────────
 
@@ -235,6 +235,43 @@ export async function handleUserMessage(userMessage: string): Promise<AgentRespo
       const serviceName = extractServiceFromText(trimmed);
       if (serviceName) entities.serviceName = serviceName;
     }
+
+    // 3a.2. Resolver entidades contra dados cadastrados (para intent "agendar")
+    if (intent === "agendar") {
+      // Resolver cliente no cadastro
+      if (entities.clientName && !entities.clientId) {
+        const resolvedClient = resolveClientFromStore(entities.clientName);
+        if (resolvedClient) {
+          entities.clientName = resolvedClient.name;
+          entities.clientId = String(resolvedClient.id);
+        }
+      }
+
+      // Resolver serviço no cadastro (deve existir na lista de serviços)
+      if (entities.serviceName && !entities.serviceId) {
+        const resolvedService = resolveServiceFromStore(entities.serviceName);
+        if (resolvedService) {
+          entities.serviceName = resolvedService.name;
+          entities.serviceId = String(resolvedService.id);
+        } else {
+          // Serviço mencionado não existe no cadastro — remover para slot-filling perguntar
+          delete entities.serviceName;
+        }
+      }
+
+      // Sugerir último serviço se cliente conhecido mas serviço não informado
+      if (entities.clientId && !entities.serviceName) {
+        const lastSvc = getLastServiceForClient(parseInt(entities.clientId));
+        if (lastSvc) {
+          // Verificar se o serviço ainda está ativo no cadastro
+          const svcActive = servicesStore.list(true).find(s => s.id === lastSvc.serviceId);
+          if (svcActive) {
+            entities.serviceName = svcActive.name;
+            entities.serviceId = String(svcActive.id);
+          }
+        }
+      }
+    }
   }
 
   // 3b. Se confiança baixa e LLM disponível, usar LLM
@@ -407,6 +444,27 @@ async function handleActionIntent(
   source: "nlu" | "llm" | "fallback",
   confidence: number,
 ): Promise<AgentResponse> {
+  // Validação: para "agendar", cliente deve estar no cadastro
+  if (intent === "agendar" && entities.clientName && !entities.clientId) {
+    const clients = clientsStore.list();
+    const norm = normalize(entities.clientName);
+    const suggestions = clients
+      .filter(c => {
+        const cNorm = normalize(c.name);
+        return norm.split(" ").some(p => p.length > 1 && cNorm.includes(p));
+      })
+      .slice(0, 5);
+
+    let text = `Cliente "${entities.clientName}" não encontrado no cadastro.`;
+    if (suggestions.length > 0) {
+      text += ` Clientes semelhantes: ${suggestions.map(c => c.name).join(", ")}.`;
+    } else {
+      text += ` Cadastre o cliente na página de Clientes antes de agendar.`;
+    }
+
+    return makeResponse(text, intent, entities, source, confidence);
+  }
+
   // Verificar se temos os parâmetros necessários
   const required = getRequiredParams(intent);
   const missing = required.filter(p => !(p.key in entities) || !entities[p.key]);
@@ -429,6 +487,37 @@ async function handleActionIntent(
     // Perguntar o primeiro parâmetro faltante
     const firstMissing = missing[0];
     let promptText = firstMissing.prompt;
+
+    // Customizar prompt para "agendar" com dados do cadastro
+    if (intent === "agendar") {
+      if (firstMissing.key === "serviceName") {
+        const services = servicesStore.list(true);
+        if (services.length > 0) {
+          // Se já tem cliente, sugerir último serviço
+          if (entities.clientId) {
+            const lastSvc = getLastServiceForClient(parseInt(entities.clientId));
+            if (lastSvc) {
+              const svcActive = servicesStore.list(true).find(s => s.id === lastSvc.serviceId);
+              if (svcActive) {
+                const others = services.filter(s => s.id !== svcActive.id).map(s => s.name).join(", ");
+                promptText = `Qual serviço para ${entities.clientName}? Último serviço: "${svcActive.name}" (${svcActive.durationMinutes}min - R$${svcActive.price.toFixed(2)}). Outros: ${others}`;
+              } else {
+                promptText = `Qual serviço? Disponíveis: ${services.map(s => `${s.name} (${s.durationMinutes}min - R$${s.price.toFixed(2)})`).join(", ")}`;
+              }
+            } else {
+              promptText = `Qual serviço para ${entities.clientName}? Disponíveis: ${services.map(s => `${s.name} (${s.durationMinutes}min - R$${s.price.toFixed(2)})`).join(", ")}`;
+            }
+          } else {
+            promptText = `Qual serviço? Disponíveis: ${services.map(s => `${s.name} (${s.durationMinutes}min - R$${s.price.toFixed(2)})`).join(", ")}`;
+          }
+        }
+      } else if (firstMissing.key === "clientName") {
+        const clients = clientsStore.list();
+        if (clients.length > 0 && clients.length <= 20) {
+          promptText = `Para qual cliente? Cadastrados: ${clients.map(c => c.name).join(", ")}`;
+        }
+      }
+    }
 
     // Se LLM disponível, gerar prompt mais natural
     if (isLLMConfigured() && agentConfig) {
@@ -803,10 +892,75 @@ async function handleSlotFillingResponse(
     };
   }
 
-  // Preencher o slot com a resposta do usuário
-  const remaining = fillSlot(slotName, text);
+  // Validar e resolver valor do slot contra dados cadastrados (para "agendar")
+  let slotValue = text;
+  if (slotState.flowId === "agendar") {
+    if (slotName === "clientName") {
+      const resolved = resolveClientFromStore(text);
+      if (resolved) {
+        slotValue = resolved.name;
+        // Guardar clientId nos filledSlots para uso posterior
+        slotState.filledSlots.clientId = String(resolved.id);
+      } else {
+        // Cliente não encontrado — pedir novamente
+        const clients = clientsStore.list();
+        const norm = normalize(text);
+        const suggestions = clients
+          .filter(c => norm.split(" ").some(p => p.length > 1 && normalize(c.name).includes(p)))
+          .slice(0, 5);
+        let msg = `Cliente "${text}" não encontrado no cadastro.`;
+        if (suggestions.length > 0) {
+          msg += ` Clientes semelhantes: ${suggestions.map(c => c.name).join(", ")}.`;
+        } else {
+          msg += ` Cadastre o cliente na página de Clientes antes de agendar.`;
+        }
+        addUserTurn(text, slotState.flowId, {});
+        addAgentTurn(msg, slotState.flowId);
+        return {
+          text: msg,
+          intent: slotState.flowId,
+          entities: { ...slotState.filledSlots },
+          actionExecuted: false,
+          awaitingConfirmation: false,
+          awaitingInput: true,
+          missingParam: slotName,
+          source: "nlu",
+          confidence: 0.9,
+        };
+      }
+    } else if (slotName === "serviceName") {
+      const resolved = resolveServiceFromStore(text);
+      if (resolved) {
+        slotValue = resolved.name;
+        slotState.filledSlots.serviceId = String(resolved.id);
+      } else {
+        // Serviço não encontrado — pedir novamente com lista
+        const services = servicesStore.list(true);
+        let msg = `Serviço "${text}" não encontrado no cadastro.`;
+        if (services.length > 0) {
+          msg += ` Serviços disponíveis: ${services.map(s => `${s.name} (${s.durationMinutes}min - R$${s.price.toFixed(2)})`).join(", ")}`;
+        }
+        addUserTurn(text, slotState.flowId, {});
+        addAgentTurn(msg, slotState.flowId);
+        return {
+          text: msg,
+          intent: slotState.flowId,
+          entities: { ...slotState.filledSlots },
+          actionExecuted: false,
+          awaitingConfirmation: false,
+          awaitingInput: true,
+          missingParam: slotName,
+          source: "nlu",
+          confidence: 0.9,
+        };
+      }
+    }
+  }
 
-  addUserTurn(text, slotState.flowId, { [slotName]: text });
+  // Preencher o slot com a resposta do usuário (resolvida)
+  const remaining = fillSlot(slotName, slotValue);
+
+  addUserTurn(text, slotState.flowId, { [slotName]: slotValue });
 
   if (Object.keys(remaining).length > 0) {
     const nextEntry = Object.entries(remaining)[0];
@@ -946,7 +1100,7 @@ function buildActionDescription(intent: string, entities: Record<string, string>
   }
 }
 
-/** Extrai nome de serviço do texto, tentando primeiro o store e depois palavras-chave comuns */
+/** Extrai nome de serviço do texto, validando contra serviços cadastrados no store */
 function extractServiceFromText(text: string): string | null {
   const q = text
     .toLowerCase()
@@ -956,8 +1110,10 @@ function extractServiceFromText(text: string): string | null {
     .replace(/\s+/g, " ")
     .trim();
 
-  // 1. Tentar matching com serviços cadastrados no store (nome completo)
   const services = servicesStore.list(true);
+  if (services.length === 0) return null;
+
+  // 1. Match exato com nome completo do serviço cadastrado
   for (const svc of services) {
     const svcNorm = svc.name
       .toLowerCase()
@@ -966,7 +1122,7 @@ function extractServiceFromText(text: string): string | null {
     if (q.includes(svcNorm)) return svc.name;
   }
 
-  // 2. Tentar matching parcial com serviços do store (primeira palavra significativa)
+  // 2. Match parcial com palavras significativas do nome do serviço
   for (const svc of services) {
     const svcNorm = svc.name
       .toLowerCase()
@@ -976,7 +1132,7 @@ function extractServiceFromText(text: string): string | null {
     if (parts.length > 0 && parts.some((p: string) => q.includes(p))) return svc.name;
   }
 
-  // 3. Fallback: palavras-chave de serviços comuns de salão
+  // 3. Palavras-chave comuns — só retorna se encontrar correspondência no store
   const serviceKeywords = [
     "corte masculino", "corte feminino", "corte infantil",
     "corte e barba", "corte", "escova progressiva", "escova",
@@ -987,7 +1143,87 @@ function extractServiceFromText(text: string): string | null {
   ];
 
   for (const keyword of serviceKeywords) {
-    if (q.includes(keyword)) return keyword;
+    if (q.includes(keyword)) {
+      // Tentar encontrar esse keyword no store
+      for (const svc of services) {
+        const svcNorm = svc.name
+          .toLowerCase()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "");
+        if (svcNorm.includes(keyword) || keyword.includes(svcNorm)) return svc.name;
+      }
+    }
+  }
+
+  return null;
+}
+
+/** Busca cliente no cadastro por nome (fuzzy match) */
+function resolveClientFromStore(name: string): { id: number; name: string } | null {
+  const clients = clientsStore.list();
+  const norm = normalize(name);
+
+  // 1. Match exato
+  for (const c of clients) {
+    if (normalize(c.name) === norm) return { id: c.id, name: c.name };
+  }
+
+  // 2. Match parcial (nome contém ou é contido)
+  for (const c of clients) {
+    const cNorm = normalize(c.name);
+    if (cNorm.includes(norm) || norm.includes(cNorm)) return { id: c.id, name: c.name };
+  }
+
+  // 3. Match por partes do nome (ex: "João" encontra "João Silva")
+  const parts = norm.split(" ").filter(p => p.length > 2);
+  if (parts.length > 0) {
+    for (const c of clients) {
+      const cNorm = normalize(c.name);
+      if (parts.every(p => cNorm.includes(p))) return { id: c.id, name: c.name };
+    }
+  }
+
+  return null;
+}
+
+/** Busca serviço ativo no cadastro por nome (fuzzy match) */
+function resolveServiceFromStore(name: string): { id: number; name: string; durationMinutes: number; price: number } | null {
+  const services = servicesStore.list(true);
+  const norm = normalize(name);
+
+  // 1. Match exato
+  for (const s of services) {
+    if (normalize(s.name) === norm) return { id: s.id, name: s.name, durationMinutes: s.durationMinutes, price: s.price };
+  }
+
+  // 2. Match parcial
+  for (const s of services) {
+    const sNorm = normalize(s.name);
+    if (sNorm.includes(norm) || norm.includes(sNorm)) return { id: s.id, name: s.name, durationMinutes: s.durationMinutes, price: s.price };
+  }
+
+  // 3. Match por palavras significativas
+  const parts = norm.split(" ").filter(p => p.length > 3);
+  if (parts.length > 0) {
+    for (const s of services) {
+      const sNorm = normalize(s.name);
+      if (parts.some(p => sNorm.includes(p))) return { id: s.id, name: s.name, durationMinutes: s.durationMinutes, price: s.price };
+    }
+  }
+
+  return null;
+}
+
+/** Busca o último serviço feito pelo cliente no histórico de agendamentos */
+function getLastServiceForClient(clientId: number): { serviceId: number; name: string } | null {
+  const allAppts = appointmentsStore.list({});
+  const clientAppts = allAppts
+    .filter(a => a.clientId === clientId && a.services && a.services.length > 0)
+    .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
+
+  if (clientAppts.length > 0 && clientAppts[0].services.length > 0) {
+    const lastSvc = clientAppts[0].services[0];
+    return { serviceId: lastSvc.serviceId, name: lastSvc.name };
   }
 
   return null;
