@@ -62,27 +62,34 @@ function AppContent() {
             model: "openai/gpt-4o-mini",
             businessContext: "Domínio Pro - Sistema de gestão para barbearias e salões. Especializado em agendamentos, controle de caixa e relatórios.",
             llmAsFallback: true,
-
             // ── Fornece dados reais do sistema para o LLM ──────────
             fetchSystemData: async (intent, entities) => {
               try {
-                const { useStore } = await import("./lib/store");
-                const state = useStore.getState();
+                const {
+                  appointmentsStore,
+                  clientsStore,
+                  servicesStore,
+                  cashEntriesStore,
+                } = await import("./lib/store");
+
                 const today = new Date().toISOString().split("T")[0];
 
-                if (intent.includes("agendamento") || intent.includes("agenda")) {
-                  const dateFilter = entities.date === "amanha"
-                    ? new Date(Date.now() + 86400000).toISOString().split("T")[0]
-                    : today;
-                  const appts = state.appointments.filter((a: any) =>
-                    !entities.date || entities.date === "semana"
-                      ? true
-                      : a.date === dateFilter
-                  );
-                  return `Agendamentos encontrados (${appts.length}): ${JSON.stringify(
-                    appts.slice(0, 10).map((a: any) => ({
-                      id: a.id, cliente: a.clientName, servico: a.serviceName,
-                      data: a.date, hora: a.time, status: a.status,
+                if (intent.includes("agendamento") || intent.includes("agenda") || intent.includes("agendar")) {
+                  let dateFilter = today;
+                  if (entities.date === "amanha") {
+                    dateFilter = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+                  }
+                  const appts = entities.date === "semana"
+                    ? appointmentsStore.list()
+                    : appointmentsStore.list({ date: dateFilter });
+                  return `Agendamentos (${appts.length}): ${JSON.stringify(
+                    appts.slice(0, 15).map(a => ({
+                      id: a.id,
+                      cliente: a.clientName,
+                      data: a.startTime.split("T")[0],
+                      hora: a.startTime.split("T")[1]?.slice(0, 5),
+                      status: a.status,
+                      servicos: a.services?.map(s => s.serviceName).join(", "),
                     }))
                   )}`;
                 }
@@ -90,72 +97,157 @@ function AppContent() {
                 if (intent.includes("cliente")) {
                   const q = entities.clientName?.toLowerCase() ?? "";
                   const clients = q
-                    ? state.clients.filter((c: any) => c.name?.toLowerCase().includes(q))
-                    : state.clients.slice(0, 10);
+                    ? clientsStore.list().filter(c => c.name?.toLowerCase().includes(q))
+                    : clientsStore.list().slice(0, 15);
                   return `Clientes (${clients.length}): ${JSON.stringify(
-                    clients.map((c: any) => ({ id: c.id, nome: c.name, telefone: c.phone }))
+                    clients.map(c => ({ id: c.id, nome: c.name, telefone: c.phone }))
                   )}`;
                 }
 
                 if (intent.includes("servico")) {
-                  return `Serviços: ${JSON.stringify(
-                    state.services.map((s: any) => ({ id: s.id, nome: s.name, preco: s.price }))
+                  return `Servicos: ${JSON.stringify(
+                    servicesStore.list().map(s => ({ id: s.id, nome: s.name, preco: s.price, duracao: s.durationMinutes }))
                   )}`;
                 }
 
-                if (intent.includes("financeiro") || intent.includes("relatorio")) {
-                  const caixa = state.cashEntries?.filter((e: any) => e.date === today) ?? [];
-                  const total = caixa.reduce((s: number, e: any) => s + (e.amount ?? 0), 0);
-                  return `Financeiro hoje: total R$ ${total.toFixed(2)}, lançamentos: ${caixa.length}`;
+                if (intent.includes("financeiro") || intent.includes("relatorio") || intent.includes("caixa")) {
+                  const entries = cashEntriesStore?.list?.() ?? [];
+                  const todayEntries = entries.filter((e) => e.createdAt?.startsWith(today));
+                  const total = todayEntries.reduce((s, e) => s + (e.amount ?? 0), 0);
+                  return `Caixa hoje: total R$ ${total.toFixed(2)}, lancamentos: ${todayEntries.length}`;
                 }
 
                 return "";
               } catch (e) {
-                console.error("Erro ao buscar dados do sistema:", e);
+                console.error("[fetchSystemData] Erro:", e);
                 return "";
               }
             },
 
-            // ── Executa ações reais no sistema ──────────────────────
+            // ── Executa acoes reais no sistema ──────────────────────
             executeToolAction: async (toolId, params) => {
               try {
-                const { useStore } = await import("./lib/store");
-                const state = useStore.getState();
+                const {
+                  appointmentsStore,
+                  clientsStore,
+                  servicesStore,
+                  employeesStore,
+                } = await import("./lib/store");
+
+                if (toolId === "agendar") {
+                  const clientName = params.clientName ?? params.client ?? "Cliente";
+                  const serviceName = params.serviceName ?? params.service ?? params.servico ?? "Servico";
+                  const dateRaw = params.date ?? params.data;
+                  const timeRaw = params.time ?? params.horario ?? params.hora;
+
+                  if (!dateRaw || !timeRaw) {
+                    return `Faltam informacoes: ${!dateRaw ? "data " : ""}${!timeRaw ? "horario" : ""}`.trim();
+                  }
+
+                  let resolvedDate = dateRaw;
+                  if (dateRaw === "hoje") {
+                    resolvedDate = new Date().toISOString().split("T")[0];
+                  } else if (dateRaw === "amanha") {
+                    resolvedDate = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+                  }
+
+                  let resolvedTime = timeRaw.replace(/h/i, ":").trim();
+                  if (/^\d{1,2}$/.test(resolvedTime)) resolvedTime = `${resolvedTime}:00`;
+                  if (!/^\d{1,2}:\d{2}$/.test(resolvedTime)) resolvedTime = "09:00";
+
+                  const services = servicesStore.list();
+                  const svc = services.find(s =>
+                    s.name.toLowerCase().includes(serviceName.toLowerCase()) ||
+                    serviceName.toLowerCase().includes(s.name.toLowerCase())
+                  ) ?? services[0];
+
+                  const employees = employeesStore.list(true);
+                  if (employees.length === 0) return "Nenhum funcionario cadastrado.";
+                  const emp = employees[0];
+
+                  const durationMs = (svc?.durationMinutes ?? 60) * 60 * 1000;
+                  const startTime = `${resolvedDate}T${resolvedTime}:00`;
+                  const endTime = new Date(new Date(startTime).getTime() + durationMs)
+                    .toISOString().slice(0, 16) + ":00";
+
+                  const allClients = clientsStore.list();
+                  const foundClient = allClients.find(c =>
+                    c.name?.toLowerCase().includes(clientName.toLowerCase())
+                  );
+
+                  const newAppt = await appointmentsStore.create({
+                    clientName,
+                    clientId: foundClient?.id ?? null,
+                    employeeId: emp.id,
+                    startTime,
+                    endTime,
+                    status: "scheduled",
+                    totalPrice: svc?.price ?? null,
+                    notes: null,
+                    paymentStatus: null,
+                    groupId: null,
+                    services: svc ? [{
+                      serviceId: svc.id,
+                      serviceName: svc.name,
+                      price: svc.price,
+                      durationMinutes: svc.durationMinutes,
+                      employeeId: emp.id,
+                    }] : [],
+                  });
+
+                  window.dispatchEvent(new Event("store_updated"));
+                  return `Agendamento criado!\nCliente: ${clientName}\nServico: ${svc?.name ?? serviceName}\nData: ${resolvedDate} as ${resolvedTime}\nFuncionario: ${emp.name}`;
+                }
 
                 if (toolId === "cancelar_agendamento") {
-                  const dateFilter = params.date ?? params.sourceDate;
+                  const dateRaw = params.date ?? params.sourceDate;
+                  let resolvedDate = dateRaw;
+                  if (dateRaw === "hoje") resolvedDate = new Date().toISOString().split("T")[0];
+                  else if (dateRaw === "amanha") {
+                    resolvedDate = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+                  }
                   const clientFilter = params.clientName?.toLowerCase();
-                  const targets = state.appointments.filter((a: any) => {
-                    const matchDate = dateFilter ? a.date === dateFilter : true;
-                    const matchClient = clientFilter
-                      ? a.clientName?.toLowerCase().includes(clientFilter)
-                      : true;
-                    return matchDate && matchClient && a.status !== "cancelado";
+                  const targets = appointmentsStore.list(resolvedDate ? { date: resolvedDate } : undefined).filter(a => {
+                    const matchClient = clientFilter ? a.clientName?.toLowerCase().includes(clientFilter) : true;
+                    return matchClient && a.status !== "cancelled";
                   });
                   if (targets.length === 0) return "Nenhum agendamento encontrado para cancelar.";
                   for (const appt of targets) {
-                    await state.updateAppointment(appt.id, { status: "cancelado" });
+                    await appointmentsStore.update(appt.id, { status: "cancelled" });
                   }
-                  return `${targets.length} agendamento(s) cancelado(s) com sucesso.`;
+                  window.dispatchEvent(new Event("store_updated"));
+                  return `${targets.length} agendamento(s) cancelado(s).`;
                 }
 
                 if (toolId === "mover_agendamento" || toolId === "reagendar") {
-                  const appt = state.appointments.find((a: any) =>
-                    a.date === params.sourceDate &&
-                    (!params.clientName || a.clientName?.toLowerCase().includes(params.clientName.toLowerCase()))
+                  const srcDate = params.sourceDate === "hoje"
+                    ? new Date().toISOString().split("T")[0]
+                    : params.sourceDate;
+                  const appts = appointmentsStore.list(srcDate ? { date: srcDate } : undefined);
+                  const appt = appts.find(a =>
+                    !params.clientName || a.clientName?.toLowerCase().includes(params.clientName.toLowerCase())
                   );
-                  if (!appt) return "Agendamento de origem não encontrado.";
-                  await state.updateAppointment(appt.id, {
-                    date: params.targetDate ?? appt.date,
-                    time: params.targetTime ?? appt.time,
-                  });
-                  return `Agendamento reagendado para ${params.targetDate ?? appt.date} às ${params.targetTime ?? appt.time}.`;
+                  if (!appt) return "Agendamento de origem nao encontrado.";
+
+                  const tgtDate = params.targetDate === "amanha"
+                    ? new Date(Date.now() + 86400000).toISOString().split("T")[0]
+                    : (params.targetDate ?? appt.startTime.split("T")[0]);
+                  let tgtTime = (params.targetTime ?? params.time ?? appt.startTime.split("T")[1]?.slice(0, 5) ?? "09:00")
+                    .replace(/h/i, ":").trim();
+                  if (/^\d{1,2}$/.test(tgtTime)) tgtTime = `${tgtTime}:00`;
+
+                  const durationMs = new Date(appt.endTime).getTime() - new Date(appt.startTime).getTime();
+                  const newStart = `${tgtDate}T${tgtTime}:00`;
+                  const newEnd = new Date(new Date(newStart).getTime() + durationMs).toISOString().slice(0, 19);
+                  await appointmentsStore.update(appt.id, { startTime: newStart, endTime: newEnd });
+                  window.dispatchEvent(new Event("store_updated"));
+                  return `Agendamento reagendado para ${tgtDate} as ${tgtTime}.`;
                 }
 
-                return "Ação reconhecida, mas não implementada para este tipo.";
+                return "Acao reconhecida, mas nao implementada.";
               } catch (e) {
-                console.error("Erro ao executar ação:", e);
-                return "Erro ao executar a ação no sistema.";
+                console.error("[executeToolAction] Erro:", e);
+                return `Erro ao executar a acao: ${e instanceof Error ? e.message : String(e)}`;
               }
             },
           });
