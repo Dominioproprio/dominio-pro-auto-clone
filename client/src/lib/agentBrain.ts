@@ -24,7 +24,10 @@ import {
 import { calcPeriodStats, getAppointmentsInPeriod, getPeriodDates } from "./analytics";
 import { isScheduleCommand, processCommand } from "./agentCommands";
 import { generateOnDemandReport } from "./agentReports";
-import { processMessage, getDynamicQuickActions, PHRASE_TEMPLATES, type OrchestratorResult, type DynamicQuickAction } from "./agentOrchestrator";
+
+// --- IMPORTAÇÃO CORRIGIDA (ETAPA 2b/2c) ---
+import { handleUserMessage, getDynamicQuickActions, PHRASE_TEMPLATES, type OrchestratorResult, type DynamicQuickAction } from "./agentOrchestrator";
+
 import { setCurrentPage as setContextPage } from "./agentContext";
 import {
   isAgendaActionCommand,
@@ -530,9 +533,10 @@ export function generateSuggestions(): AgentSuggestion[] {
  */
 export async function answerQuestionAsync(question: string): Promise<{ message: string; navigateTo?: string }> {
   try {
-    const result = await processMessage(question);
+    // Chamada corrigida para handleUserMessage (Etapa 2c)
+    const result = await handleUserMessage(question);
     if (result.handled) {
-      return { message: result.message, navigateTo: result.navigateTo };
+      return { message: result.text, navigateTo: result.navigateTo };
     }
   } catch {
     // Se o orquestrador falhar, cai no fallback
@@ -728,7 +732,7 @@ export function getWelcomeMessage(): AgentMessage {
   return {
     id: genId("welcome"),
     role: "agent",
-    content: `${greeting}! Sou o **Super Agente** do Dominio Pro. Gerencio seu salao inteiro por aqui!\n\nPosso fazer tudo pelo chat:\n\n**Clientes:** cadastrar, editar, excluir, buscar, ver historico, listar inativos e aniversariantes\n**Funcionarios:** cadastrar, editar, listar equipe e comissoes\n**Servicos:** cadastrar, editar, ver catalogo e mais populares\n**Caixa:** abrir, fechar, registrar pagamentos, consultar saldo\n**Navegacao:** "ir para agenda", "abrir relatorios"\n**Relatorios:** faturamento, resumo do dia/semana/mes\n**Avisos:** "me avisa todo sabado o rendimento"\n**Agenda:** criar, mover e cancelar agendamentos\n\nExemplos:\n- "Cadastrar cliente Maria Silva com telefone 11999887766"\n- "Abrir caixa com saldo inicial 200"\n- "Historico do cliente Joao"\n- "Listar servicos"\n- "Fechar caixa"\n\nDigite o que precisa e eu resolvo!`,
+    content: `${greeting}! Sou o **Super Agente** do Dominio Pro. Gerencio seu salao inteiro por aqui!\n\nPosso fazer tudo pelo chat:\n\n**Clientes:** cadastrar, editar, excluir, buscar, ver historico, listar inativos e aniversariantes\n**Funcionarios:** cadastrar, editar, listar equipe e comissoes\n**Servicos:** cadastrar, editar, ver catalogo e mais populares\n**Caixa:** abrir, fechar, registrar pagamentos, consultar saldo\n**Navegacao:** "ir para agenda", "abrir relatorios"\n**Relatorios:** faturamento, resumo do dia/semana/mes\n**Avisos:** "me avisa todo sabado o rendimento\"\n**Agenda:** criar, mover e cancelar agendamentos\n\nExemplos:\n- \"Cadastrar cliente Maria Silva com telefone 11999887766\"\n- \"Abrir caixa com saldo inicial 200\"\n- \"Historico do cliente Joao\"\n- \"Listar servicos\"\n- \"Fechar caixa\"\n\nDigite o que precisa e eu resolvo!`,
     timestamp: Date.now(),
   };
 }
