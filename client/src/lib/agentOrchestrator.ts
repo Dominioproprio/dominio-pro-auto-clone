@@ -58,6 +58,8 @@ import {
 } from "./agentLLM";
 
 import { isScheduleCommand, processCommand } from "./agentCommands";
+import { extractEntities as extractNLUEntities } from "./agentNLU";
+import { servicesStore } from "./store";
 
 // ─── Tipos ─────────────────────────────────────────────────
 
@@ -217,6 +219,24 @@ export async function handleUserMessage(userMessage: string): Promise<AgentRespo
   entities = localResult.entities;
   confidence = localResult.confidence;
 
+  // 3a.1. Extrair entidades do texto usando NLU e mapear para nomes do orquestrador
+  if (isActionIntent(intent)) {
+    const nluEntities = extractNLUEntities(trimmed);
+    if (nluEntities.nome && !entities.clientName) {
+      entities.clientName = nluEntities.nome;
+    }
+    if (nluEntities.hora && !entities.time) {
+      entities.time = nluEntities.hora;
+    }
+    if (nluEntities.data && !entities.date) {
+      entities.date = nluEntities.data;
+    }
+    if (!entities.serviceName) {
+      const serviceName = extractServiceFromText(trimmed);
+      if (serviceName) entities.serviceName = serviceName;
+    }
+  }
+
   // 3b. Se confiança baixa e LLM disponível, usar LLM
   const shouldUseLLM =
     agentConfig?.alwaysUseLLM ||
@@ -336,7 +356,10 @@ function classifyLocally(text: string): LocalClassification {
 
   // Agendar novo
   if (/agend[ae]|marc[ae]|quero\s+marcar|preciso\s+marcar|reserv[ae]/.test(q)) {
-    return { intent: "agendar", entities: {}, confidence: 0.75 };
+    const entities: Record<string, string> = {};
+    if (q.includes("hoje")) entities.date = "hoje";
+    else if (q.includes("amanha")) entities.date = "amanha";
+    return { intent: "agendar", entities, confidence: 0.75 };
   }
 
   // Clientes
@@ -921,6 +944,53 @@ function buildActionDescription(intent: string, entities: Record<string, string>
     default:
       return `Executar ${intent}`;
   }
+}
+
+/** Extrai nome de serviço do texto, tentando primeiro o store e depois palavras-chave comuns */
+function extractServiceFromText(text: string): string | null {
+  const q = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[?!.,;:]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // 1. Tentar matching com serviços cadastrados no store (nome completo)
+  const services = servicesStore.list(true);
+  for (const svc of services) {
+    const svcNorm = svc.name
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+    if (q.includes(svcNorm)) return svc.name;
+  }
+
+  // 2. Tentar matching parcial com serviços do store (primeira palavra significativa)
+  for (const svc of services) {
+    const svcNorm = svc.name
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+    const parts = svcNorm.split(" ").filter((p: string) => p.length > 3);
+    if (parts.length > 0 && parts.some((p: string) => q.includes(p))) return svc.name;
+  }
+
+  // 3. Fallback: palavras-chave de serviços comuns de salão
+  const serviceKeywords = [
+    "corte masculino", "corte feminino", "corte infantil",
+    "corte e barba", "corte", "escova progressiva", "escova",
+    "progressiva", "manicure e pedicure", "manicure", "pedicure",
+    "tintura", "coloracao", "hidratacao", "alisamento",
+    "barba", "sobrancelha", "luzes", "mechas",
+    "relaxamento", "cauterizacao", "selagem", "botox capilar",
+  ];
+
+  for (const keyword of serviceKeywords) {
+    if (q.includes(keyword)) return keyword;
+  }
+
+  return null;
 }
 
 function handleLocalQuery(
