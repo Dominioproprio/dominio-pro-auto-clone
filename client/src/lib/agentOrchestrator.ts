@@ -57,6 +57,8 @@ import {
   type IntentClassification,
 } from "./agentLLM";
 
+import { isScheduleCommand, processCommand } from "./agentCommands";
+
 // ─── Tipos ─────────────────────────────────────────────────
 
 export interface AgentConfig {
@@ -183,6 +185,23 @@ export async function handleUserMessage(userMessage: string): Promise<AgentRespo
   const slotState = getSlotFillingState();
   if (slotState) {
     return await handleSlotFillingResponse(trimmed, slotState);
+  }
+
+  // ─── 2.5. Verificar se é comando de agendamento recorrente ──
+  if (isScheduleCommand(trimmed)) {
+    const cmdResult = processCommand(trimmed);
+    addUserTurn(trimmed, "schedule_command", {});
+    addAgentTurn(cmdResult.message, "schedule_command");
+    return {
+      text: cmdResult.message,
+      intent: "schedule_command",
+      entities: {},
+      actionExecuted: cmdResult.type === "task_created" || cmdResult.type === "task_removed",
+      awaitingConfirmation: false,
+      awaitingInput: false,
+      source: "nlu",
+      confidence: 1.0,
+    };
   }
 
   // ─── 3. Classificar intent ──────────────────────────────
