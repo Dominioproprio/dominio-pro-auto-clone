@@ -1,6 +1,6 @@
 /**
- * DashboardPage â€” VisÃ£o geral do dia com mÃ©tricas e acesso rÃ¡pido.
- * DomÃ­nio Pro â€” design glassmorphism 2026.
+ * DashboardPage — Visão geral do dia com métricas e acesso rápido.
+ * Domínio Pro — design glassmorphism 2026.
  */
 import { useState, useEffect, useMemo } from "react";
 import { format } from "date-fns";
@@ -20,9 +20,9 @@ const STATUS_LABEL: Record<string, { label: string; color: string }> = {
   scheduled:   { label: "Agendado",       color: "#3b82f6" },
   confirmed:   { label: "Confirmado",     color: "#10b981" },
   in_progress: { label: "Em andamento",   color: "#f59e0b" },
-  completed:   { label: "ConcluÃ­do",      color: "#22c55e" },
+  completed:   { label: "Concluído",      color: "#22c55e" },
   cancelled:   { label: "Cancelado",      color: "#ef4444" },
-  no_show:     { label: "NÃ£o compareceu", color: "#6b7280" },
+  no_show:     { label: "Não compareceu", color: "#6b7280" },
 };
 
 const toNum = (v: unknown) => parseFloat(String(v ?? 0)) || 0;
@@ -80,7 +80,7 @@ function ApptCard({ appt, employees, accent }: {
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-white truncate">{appt.clientName || "Sem nome"}</p>
         <p className="text-xs text-white/40 truncate">
-          {format(start, "HH:mm")}â€“{format(end, "HH:mm")} Â· {emp?.name.split(" ")[0] || "â€”"}
+          {format(start, "HH:mm")}–{format(end, "HH:mm")} · {emp?.name.split(" ")[0] || "—"}
         </p>
       </div>
       <div className="flex flex-col items-end gap-1 flex-shrink-0">
@@ -151,9 +151,9 @@ export default function DashboardPage() {
   const salonName = (() => {
     try {
       const s = localStorage.getItem("salon_config");
-      if (s) return JSON.parse(s).salonName || "DomÃ­nio Pro";
+      if (s) return JSON.parse(s).salonName || "Domínio Pro";
     } catch { /* ignore */ }
-    return "DomÃ­nio Pro";
+    return "Domínio Pro";
   })();
 
   if (loading) {
@@ -171,7 +171,7 @@ export default function DashboardPage() {
   return (
     <div className="p-4 md:p-6 space-y-6 animate-slide-up">
 
-      {/* SaudaÃ§Ã£o */}
+      {/* Saudação */}
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm text-white/40">{greeting} ðŸ‘‹</p>
@@ -195,16 +195,16 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* MÃ©tricas do dia */}
+      {/* Métricas do dia */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <MetricCard icon={Calendar} label="Agendamentos hoje" value={totalHoje}
           sub={`${pendentes} pendentes`} color={accent}
           onClick={() => setLocation("/agenda")} />
-        <MetricCard icon={CheckCircle} label="ConcluÃ­dos" value={concluidos}
-          sub={totalHoje > 0 ? `${Math.round(concluidos / totalHoje * 100)}% do dia` : "â€”"}
+        <MetricCard icon={CheckCircle} label="Concluídos" value={concluidos}
+          sub={totalHoje > 0 ? `${Math.round(concluidos / totalHoje * 100)}% do dia` : "—"}
           color="#22c55e" />
         <MetricCard icon={DollarSign} label="Faturamento hoje" value={`R$ ${faturamentoHoje.toFixed(0)}`}
-          sub="serviÃ§os concluÃ­dos" color="#f59e0b"
+          sub="serviços concluídos" color="#f59e0b"
           onClick={() => setLocation("/caixa")} />
         <MetricCard icon={Users} label="Clientes" value={allClients.length}
           sub="cadastrados" color="#3b82f6"
@@ -225,7 +225,7 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* FuncionÃ¡rios â€” status */}
+      {/* Funcionários — status */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <p className="text-sm font-semibold text-white/70">Equipe hoje</p>
@@ -275,15 +275,15 @@ export default function DashboardPage() {
             );
           })}
           {employees.length === 0 && (
-            <p className="text-xs text-white/30 py-4">Nenhum funcionÃ¡rio cadastrado</p>
+            <p className="text-xs text-white/30 py-4">Nenhum funcionário cadastrado</p>
           )}
         </div>
       </div>
 
-      {/* PrÃ³ximos agendamentos */}
+      {/* Próximos agendamentos */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
-          <p className="text-sm font-semibold text-white/70">PrÃ³ximos agendamentos</p>
+          <p className="text-sm font-semibold text-white/70">Próximos agendamentos</p>
           <button onClick={() => setLocation("/agenda")}
             className="text-xs font-medium hover:opacity-80" style={{ color: accent }}>
             Ver agenda â†’
@@ -302,12 +302,12 @@ export default function DashboardPage() {
         )}
       </div>
 
-      {/* Acesso rÃ¡pido */}
+      {/* Acesso rápido */}
       <div className="grid grid-cols-3 gap-3">
         {[
           { label: "Clientes",   icon: Users,      path: "/clientes",   color: "#3b82f6" },
-          { label: "ServiÃ§os",   icon: Scissors,   path: "/servicos",   color: "#8b5cf6" },
-          { label: "RelatÃ³rios", icon: TrendingUp, path: "/relatorios", color: "#f59e0b" },
+          { label: "Serviços",   icon: Scissors,   path: "/servicos",   color: "#8b5cf6" },
+          { label: "Relatórios", icon: TrendingUp, path: "/relatorios", color: "#f59e0b" },
         ].map(({ label, icon: Icon, path, color }) => (
           <button key={path} onClick={() => setLocation(path)}
             className="flex flex-col items-center gap-2 p-4 rounded-2xl transition-all active:scale-95 hover:brightness-110"
