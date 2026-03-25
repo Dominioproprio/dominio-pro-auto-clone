@@ -25,7 +25,7 @@ import { getSession, isAccessControlEnabled, canAccess, getDefaultRoute } from "
 import ProfileSelector from "./components/ProfileSelector";
 import AgentChat from "./components/AgentChat";
 
-// --- IMPORTAÃ‡ÃƒO DO AGENTE (CORRIGIDA PARA PASTA LIB) ---
+// --- IMPORTAÇÃO DO AGENTE (CORRIGIDA PARA PASTA LIB) ---
 import { initAgent } from "./lib/agentOrchestrator";
 
 function getAccent() {
@@ -46,7 +46,7 @@ function AppContent() {
   const [accessEnabled, setAccessEnabled] = useState(isAccessControlEnabled);
   const [session, setSession]             = useState(getSession);
 
-  // â”€â”€ INICIALIZAÃ‡ÃƒO DO AGENTE IA (ETAPA 2b) â”€â”€
+  // ── INICIALIZAÇÃO DO AGENTE IA (ETAPA 2b) ──
   useEffect(() => {
     const setupIA = async () => {
       let token = localStorage.getItem("github_token");
@@ -60,7 +60,7 @@ function AppContent() {
           await initAgent({
             githubToken: token,
             model: "openai/gpt-4o-mini",
-            businessContext: "DomÃ­nio Pro - Sistema de gestÃ£o para barbearias e salÃµes. Especializado em agendamentos, controle de caixa e relatÃ³rios.",
+            businessContext: "Domínio Pro - Sistema de gestão para barbearias e salões. Especializado em agendamentos, controle de caixa e relatórios.",
             llmAsFallback: true,
             // â”€â”€ Fornece dados reais do sistema para o LLM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             fetchSystemData: async (intent, entities) => {
@@ -137,7 +137,7 @@ function AppContent() {
                   employeesStore,
                 } = await import("./lib/store");
 
-                // Helper para normalizar horÃ¡rio
+                // Helper para normalizar horário
                 const normalizeTime = (raw: string) => {
                   if (!raw) return null;
                   let t = raw.toLowerCase().replace(/h/i, ":").replace(/\s+/g, "").trim();
@@ -158,7 +158,7 @@ function AppContent() {
                   const timeRaw = params.time ?? params.horario ?? params.hora;
 
                   if (!dateRaw || !timeRaw) {
-                    return `Faltam informaÃ§Ãµes: ${!dateRaw ? "data " : ""}${!timeRaw ? "horÃ¡rio" : ""}`.trim();
+                    return `Faltam informações: ${!dateRaw ? "data " : ""}${!timeRaw ? "horário" : ""}`.trim();
                   }
 
                   let resolvedDate = dateRaw;
@@ -170,7 +170,7 @@ function AppContent() {
 
                   const resolvedTime = normalizeTime(timeRaw);
                   if (!resolvedTime) {
-                    return `HorÃ¡rio "${timeRaw}" invÃ¡lido. Por favor, use o formato HH:MM (ex: 14:30).`;
+                    return `Horário "${timeRaw}" inválido. Por favor, use o formato HH:MM (ex: 14:30).`;
                   }
 
                   const services = servicesStore.list(true);
@@ -183,22 +183,22 @@ function AppContent() {
 
                   if (!svc) {
                     const available = services.map(s => s.name).join(", ");
-                    return `ServiÃ§o "${serviceName}" nÃ£o encontrado. ServiÃ§os disponÃ­veis: ${available || "nenhum cadastrado"}`;
+                    return `Serviço "${serviceName}" não encontrado. Serviços disponíveis: ${available || "nenhum cadastrado"}`;
                   }
 
                   const employees = employeesStore.list(true);
-                  if (employees.length === 0) return "Nenhum funcionÃ¡rio ativo cadastrado.";
+                  if (employees.length === 0) return "Nenhum funcionário ativo cadastrado.";
                   
                   let emp = employees[0];
                   if (employeeName) {
                     const foundEmp = employees.find(e => e.name.toLowerCase().includes(employeeName.toLowerCase()));
                     if (foundEmp) emp = foundEmp;
-                    else return `FuncionÃ¡rio "${employeeName}" nÃ£o encontrado ou inativo.`;
+                    else return `Funcionário "${employeeName}" não encontrado ou inativo.`;
                   } else if (employees.length > 1) {
-                    // Se houver mais de um e nÃ£o especificou, poderÃ­amos pedir para escolher, 
-                    // mas para manter o fluxo, vamos avisar qual foi selecionado ou pedir definiÃ§Ã£o.
-                    // O relatÃ³rio sugere perguntar se houver mais de um.
-                    return `Por favor, especifique o profissional. Profissionais disponÃ­veis: ${employees.map(e => e.name).join(", ")}`;
+                    // Se houver mais de um e não especificou, poderíamos pedir para escolher, 
+                    // mas para manter o fluxo, vamos avisar qual foi selecionado ou pedir definição.
+                    // O relatório sugere perguntar se houver mais de um.
+                    return `Por favor, especifique o profissional. Profissionais disponíveis: ${employees.map(e => e.name).join(", ")}`;
                   }
 
                   const durationMs = (svc.durationMinutes ?? 60) * 60 * 1000;
@@ -207,7 +207,7 @@ function AppContent() {
                   const endDt = new Date(startDt.getTime() + durationMs);
                   const endTime = endDt.toISOString().slice(0, 16) + ":00";
 
-                  // VerificaÃ§Ã£o de conflito de horÃ¡rio
+                  // Verificação de conflito de horário
                   const existing = appointmentsStore.list({ date: resolvedDate }).filter(a => a.employeeId === emp.id && a.status !== 'cancelled');
                   const hasConflict = existing.some(a => {
                     const aStart = new Date(a.startTime).getTime();
@@ -218,7 +218,7 @@ function AppContent() {
                   });
 
                   if (hasConflict) {
-                    return `O profissional ${emp.name} jÃ¡ possui um agendamento nesse horÃ¡rio (${resolvedTime}). Por favor, escolha outro horÃ¡rio ou profissional.`;
+                    return `O profissional ${emp.name} já possui um agendamento nesse horário (${resolvedTime}). Por favor, escolha outro horário ou profissional.`;
                   }
 
                   const allClients = clientsStore.list();
@@ -247,7 +247,7 @@ function AppContent() {
                   });
 
                   window.dispatchEvent(new Event("store_updated"));
-                  return `Agendamento criado com sucesso!\nCliente: ${foundClient?.name ?? clientName}\nServiÃ§o: ${svc.name}\nData: ${resolvedDate} Ã s ${resolvedTime}\nProfissional: ${emp.name}`;
+                  return `Agendamento criado com sucesso!\nCliente: ${foundClient?.name ?? clientName}\nServiço: ${svc.name}\nData: ${resolvedDate} às ${resolvedTime}\nProfissional: ${emp.name}`;
                 }
 
                 if (toolId === "cancelar_agendamento") {
@@ -267,8 +267,8 @@ function AppContent() {
                   if (targets.length === 0) return "Nenhum agendamento encontrado para cancelar.";
                   
                   if (targets.length > 1 && !params.confirmed) {
-                    const list = targets.map(a => `- ${a.clientName} Ã s ${a.startTime.split('T')[1].slice(0,5)} (${a.services?.map(s => s.name).join(', ')})`).join('\n');
-                    return `Encontrei mÃºltiplos agendamentos. Qual deseja cancelar?\n${list}\n(Por favor, seja mais especÃ­fico com o horÃ¡rio ou nome)`;
+                    const list = targets.map(a => `- ${a.clientName} às ${a.startTime.split('T')[1].slice(0,5)} (${a.services?.map(s => s.name).join(', ')})`).join('\n');
+                    return `Encontrei múltiplos agendamentos. Qual deseja cancelar?\n${list}\n(Por favor, seja mais específico com o horário ou nome)`;
                   }
 
                   for (const appt of targets) {
@@ -288,10 +288,10 @@ function AppContent() {
                     a.status !== 'cancelled' && (!clientFilter || a.clientName?.toLowerCase().includes(clientFilter))
                   );
 
-                  if (appts.length === 0) return "Agendamento de origem nÃ£o encontrado.";
+                  if (appts.length === 0) return "Agendamento de origem não encontrado.";
                   
                   if (appts.length > 1 && !params.confirmed) {
-                    const list = appts.map(a => `- ${a.clientName} Ã s ${a.startTime.split('T')[1].slice(0,5)}`).join('\n');
+                    const list = appts.map(a => `- ${a.clientName} às ${a.startTime.split('T')[1].slice(0,5)}`).join('\n');
                     return `Encontrei mais de um agendamento para este cliente/data. Qual deseja mover?\n${list}`;
                   }
 
@@ -301,7 +301,7 @@ function AppContent() {
                     : (params.targetDate ?? params.date ?? appt.startTime.split("T")[0]);
                   
                   const tgtTime = normalizeTime(params.targetTime ?? params.time ?? appt.startTime.split("T")[1]?.slice(0, 5));
-                  if (!tgtTime) return "HorÃ¡rio de destino invÃ¡lido.";
+                  if (!tgtTime) return "Horário de destino inválido.";
 
                   const durationMs = new Date(appt.endTime).getTime() - new Date(appt.startTime).getTime();
                   const newStart = `${tgtDate}T${tgtTime}:00`;
@@ -318,18 +318,18 @@ function AppContent() {
                   });
 
                   if (hasConflict) {
-                    return `NÃ£o foi possÃ­vel mover: o profissional jÃ¡ tem um agendamento em ${tgtDate} Ã s ${tgtTime}.`;
+                    return `Não foi possível mover: o profissional já tem um agendamento em ${tgtDate} às ${tgtTime}.`;
                   }
 
                   await appointmentsStore.update(appt.id, { startTime: newStart, endTime: newEnd });
                   window.dispatchEvent(new Event("store_updated"));
-                  return `Agendamento reagendado com sucesso para ${tgtDate} Ã s ${tgtTime}.`;
+                  return `Agendamento reagendado com sucesso para ${tgtDate} às ${tgtTime}.`;
                 }
 
-                return "AÃ§Ã£o reconhecida, mas nÃ£o implementada.";
+                return "Ação reconhecida, mas não implementada.";
               } catch (e) {
                 console.error("[executeToolAction] Erro:", e);
-                return `Erro ao executar a aÃ§Ã£o: ${e instanceof Error ? e.message : String(e)}`;
+                return `Erro ao executar a ação: ${e instanceof Error ? e.message : String(e)}`;
               }
             },
           });
@@ -368,7 +368,7 @@ function AppContent() {
           const opened = await autoOpenCashIfNeeded();
           if (opened) {
             toast.success("Caixa aberto automaticamente para hoje!", {
-              description: "Configure em ConfiguraÃ§Ãµes > AutomaÃ§Ã£o",
+              description: "Configure em Configurações > Automação",
               duration: 5000,
             });
           }
@@ -378,7 +378,7 @@ function AppContent() {
       })
       .catch(err => {
         console.error("Erro ao carregar dados:", err);
-        setError("NÃ£o foi possÃ­vel conectar ao banco de dados.");
+        setError("Não foi possível conectar ao banco de dados.");
         setLoading(false);
       });
   }, []);
@@ -400,7 +400,7 @@ function AppContent() {
           <div className="w-6 h-6 rounded-full border-2 border-t-transparent animate-spin"
             style={{ borderColor: accent, borderTopColor: "transparent" }} />
         </div>
-        <p className="text-sm text-white/30">Carregando DomÃ­nio Pro...</p>
+        <p className="text-sm text-white/30">Carregando Domínio Pro...</p>
       </div>
     </div>
   );
@@ -409,7 +409,7 @@ function AppContent() {
     <div className="flex items-center justify-center h-screen p-6" style={{ background: "#08080f" }}>
       <div className="text-center space-y-4 max-w-md">
         <div className="text-4xl">âš ï¸</div>
-        <h2 className="text-lg font-bold text-red-400">Erro de conexÃ£o</h2>
+        <h2 className="text-lg font-bold text-red-400">Erro de conexão</h2>
         <p className="text-sm text-white/50">{error}</p>
         <button onClick={() => window.location.reload()}
           className="px-4 py-2 rounded-xl text-sm font-semibold text-white"
