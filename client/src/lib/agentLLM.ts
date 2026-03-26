@@ -143,6 +143,44 @@ Intents possíveis: ver_agendamentos, agendar, cancelar_agendamento, reagendar, 
 Se for apenas uma pergunta ou conversa, NÃO inclua o bloco action.`;
 }
 
+// ─── Helpers de histórico ──────────────────────────────────
+
+/**
+ * Monta o array de mensagens de histórico para enviar ao LLM.
+ *
+ * IMPORTANTE: o orquestrador chama addUserTurn() ANTES de chamar sendToLLM()
+ * ou generateResponse(). Isso significa que quando getRecentTurns() é chamado
+ * aqui, a mensagem atual do usuário já está salva como o último turno.
+ *
+ * Estratégia correta:
+ *   1. Pegar N+1 turnos recentes
+ *   2. Remover o último (= mensagem atual, já salva pelo addUserTurn)
+ *   3. Adicionar a mensagem atual manualmente como última mensagem "user"
+ *
+ * Isso garante que o histórico não seja duplicado e que a ordem seja correta.
+ */
+function buildHistoryMessages(
+  userMessage: string,
+  maxTurns: number,
+): LLMMessage[] {
+  // Pega maxTurns + 1 para ter turnos anteriores após remover o atual
+  const allTurns = getRecentTurns(maxTurns + 1);
+
+  // O último turno é a mensagem atual (salva pelo addUserTurn antes desta chamada).
+  // Removemos ele para não duplicar — vamos adicioná-lo manualmente abaixo.
+  const historyTurns = allTurns.length > 0 ? allTurns.slice(0, -1) : [];
+
+  const messages: LLMMessage[] = historyTurns.map((turn) => ({
+    role: turn.role === "user" ? "user" : "assistant",
+    content: turn.text,
+  }));
+
+  // Adiciona a mensagem atual como a última "user"
+  messages.push({ role: "user", content: userMessage });
+
+  return messages;
+}
+
 // ─── Chamada à API ─────────────────────────────────────────
 
 /**
@@ -221,6 +259,8 @@ async function callGitHubModelsAPI(messages: LLMMessage[]): Promise<string> {
 /**
  * Envia uma mensagem do usuário ao LLM com todo o contexto da conversa.
  * Retorna a resposta processada com intent/entities extraídos se aplicável.
+ *
+ * NOTA: deve ser chamado APÓS addUserTurn() ter sido registrado no contexto.
  */
 export async function sendToLLM(
   userMessage: string,
@@ -228,25 +268,11 @@ export async function sendToLLM(
 ): Promise<LLMResponse> {
   const systemPrompt = buildSystemPrompt(businessContext);
 
-  // Construir histórico de mensagens a partir dos turnos recentes
-  const recentTurns = getRecentTurns(8);
   const messages: LLMMessage[] = [
     { role: "system", content: systemPrompt },
+    // Histórico correto: turnos anteriores + mensagem atual (sem duplicação)
+    ...buildHistoryMessages(userMessage, 8),
   ];
-
-  // Adicionar turnos anteriores como contexto
-  for (const turn of recentTurns) {
-    // Não incluir o turno atual (será adicionado como a mensagem do user)
-    if (turn.text === userMessage && turn === recentTurns[recentTurns.length - 1]) continue;
-
-    messages.push({
-      role: turn.role === "user" ? "user" : "assistant",
-      content: turn.text,
-    });
-  }
-
-  // Adicionar mensagem atual
-  messages.push({ role: "user", content: userMessage });
 
   const rawResponse = await callGitHubModelsAPI(messages);
 
@@ -257,9 +283,22 @@ export async function sendToLLM(
 /**
  * Classifica a intenção de uma mensagem usando o LLM.
  * Mais preciso que regex para mensagens ambíguas ou conversacionais.
+ *
+ * NOTA: classifyIntent é chamado ANTES de addUserTurn() no orquestrador,
+ * então aqui usamos getRecentTurns() diretamente (a mensagem atual ainda
+ * não foi salva). Incluímos os turnos como histórico real de mensagens
+ * para dar contexto ao classificador.
  */
 export async function classifyIntent(userMessage: string): Promise<IntentClassification> {
   const contextSummary = getContextSummaryForPrompt();
+
+  // Montar histórico recente como mensagens reais (classifyIntent é chamado
+  // antes de addUserTurn, então o último turno salvo é o turno anterior do user)
+  const recentTurns = getRecentTurns(6);
+  const historyMessages: LLMMessage[] = recentTurns.map((turn) => ({
+    role: turn.role === "user" ? "user" : "assistant",
+    content: turn.text,
+  }));
 
   const classificationPrompt = `Classifique a intenção da mensagem do usuário abaixo.
 
@@ -297,6 +336,8 @@ Entities possíveis: clientName, employeeName, serviceName, date, time, dayOfWee
 
   const messages: LLMMessage[] = [
     { role: "system", content: "Você é um classificador de intenções. Responda SOMENTE com JSON válido." },
+    // Incluir histórico real para o classificador ter contexto de conversa
+    ...historyMessages,
     { role: "user", content: classificationPrompt },
   ];
 
@@ -333,6 +374,8 @@ Entities possíveis: clientName, employeeName, serviceName, date, time, dayOfWee
 /**
  * Gera uma resposta natural para o usuário usando o LLM.
  * Usa dados reais do sistema (agendamentos, clientes) para contextualizar.
+ *
+ * NOTA: deve ser chamado APÓS addUserTurn() ter sido registrado no contexto.
  */
 export async function generateResponse(
   userMessage: string,
@@ -341,12 +384,11 @@ export async function generateResponse(
 ): Promise<string> {
   const systemPrompt = buildSystemPrompt(businessContext);
 
-  const recentTurns = getRecentTurns(6);
   const messages: LLMMessage[] = [
     { role: "system", content: systemPrompt },
   ];
 
-  // Adicionar dados do sistema se fornecidos
+  // Adicionar dados do sistema se fornecidos (como mensagem de sistema extra)
   if (systemData) {
     messages.push({
       role: "system",
@@ -354,16 +396,8 @@ export async function generateResponse(
     });
   }
 
-  // Adicionar histórico
-  for (const turn of recentTurns) {
-    if (turn.text === userMessage && turn === recentTurns[recentTurns.length - 1]) continue;
-    messages.push({
-      role: turn.role === "user" ? "user" : "assistant",
-      content: turn.text,
-    });
-  }
-
-  messages.push({ role: "user", content: userMessage });
+  // Histórico correto: turnos anteriores + mensagem atual (sem duplicação)
+  messages.push(...buildHistoryMessages(userMessage, 6));
 
   try {
     const rawResponse = await callGitHubModelsAPI(messages);
