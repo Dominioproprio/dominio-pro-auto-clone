@@ -1,4 +1,4 @@
- /**
+/**
  * agentOrchestrator.ts — Orquestrador principal do agente.
  * Conecta todos os módulos (Context, NLU, LLM, Actions) num fluxo unificado.
  */
@@ -10,33 +10,25 @@ import {
   resolveReferences,
   mergeEntities,
   getRelevantEntities,
-  getActiveTopic,
   getPendingQuestion,
-  clearPendingQuestion,
   getPendingConfirmation,
-  clearPendingConfirmation,
+  setPendingConfirmation,
   getSlotFillingState,
   fillSlot,
   clearSlotFilling,
-  startSlotFilling,
   recordAction,
   getContextSummaryForPrompt,
   setCurrentPage,
-  hasRecentConversation,
   resetConversation,
-  type ConversationTopic,
   type SlotFillingState,
 } from "./agentContext";
 
 import {
   configureLLM,
   isLLMConfigured,
-  sendToLLM,
   classifyIntent,
   generateResponse,
   testConnection,
-  type LLMResponse,
-  type IntentClassification,
 } from "./agentLLM";
 
 import { isScheduleCommand, processCommand } from "./agentCommands";
@@ -99,15 +91,9 @@ export async function initAgent(config: AgentConfig): Promise<{ ok: boolean; mes
 
   return {
     ok: true,
-    message: `Agente iniciado com sucesso! Modelo: ${test.model}`,
+    message: "Agente iniciado com sucesso!",
   };
 }
-
-export function isAgentReady(): boolean {
-  return isInitialized;
-}
-
-// ─── Handler principal ─────────────────────────────────────
 
 export async function handleUserMessage(userMessage: string): Promise<AgentResponse> {
   const trimmed = userMessage.trim();
@@ -139,18 +125,20 @@ export async function handleUserMessage(userMessage: string): Promise<AgentRespo
 
   if (isScheduleCommand(trimmed)) {
     const cmdResult = processCommand(trimmed);
-    addUserTurn(trimmed, "schedule_command", {});
-    addAgentTurn(cmdResult.message, "schedule_command");
-    return {
-      text: cmdResult.message,
-      intent: "schedule_command",
-      entities: {},
-      actionExecuted: cmdResult.type === "task_created" || cmdResult.type === "task_removed",
-      awaitingConfirmation: false,
-      awaitingInput: false,
-      source: "nlu",
-      confidence: 1.0,
-    };
+    if (cmdResult.understood) {
+      addUserTurn(trimmed, "schedule_command", {});
+      addAgentTurn(cmdResult.message, "schedule_command");
+      return {
+        text: cmdResult.message,
+        intent: "schedule_command",
+        entities: {},
+        actionExecuted: cmdResult.type === "task_created" || cmdResult.type === "task_removed",
+        awaitingConfirmation: false,
+        awaitingInput: false,
+        source: "nlu",
+        confidence: 1.0,
+      };
+    }
   }
 
   let intent: string = "outro";
@@ -200,11 +188,9 @@ export async function handleUserMessage(userMessage: string): Promise<AgentRespo
     agentConfig?.alwaysUseLLM ||
     (confidence < 0.6 && isLLMConfigured() && agentConfig?.llmAsFallback !== false);
 
-  let llmError: string | null = null;
   if (shouldUseLLM && isLLMConfigured()) {
     try {
       const llmResult = await classifyIntent(trimmed);
-      // Só usa o LLM se ele tiver uma confiança razoável e maior que a local
       if (llmResult.confidence > confidence && llmResult.confidence > 0.3) {
         intent = llmResult.intent;
         entities = { ...entities, ...llmResult.entities };
@@ -213,12 +199,9 @@ export async function handleUserMessage(userMessage: string): Promise<AgentRespo
       }
     } catch (err) {
       console.warn("[agentOrchestrator] LLM classification failed, using local NLU:", err);
-      llmError = err instanceof Error ? err.message : String(err);
     }
   }
 
-  // Se após tentar LLM a confiança ainda for muito baixa, mas temos um comando claro,
-  // podemos forçar a intenção se certas palavras-chave estiverem presentes
   if (confidence < 0.4 && (trimmed.toLowerCase().includes("agenda") || trimmed.toLowerCase().includes("marca"))) {
     if (intent === "outro") {
       intent = "agendar";
@@ -240,8 +223,6 @@ export async function handleUserMessage(userMessage: string): Promise<AgentRespo
     response = await handleConversationalIntent(intent, entities, trimmed, source, confidence);
   }
 
-  // Feedback de dificuldades técnicas removido
-
   addAgentTurn(response.text, intent);
   return response;
 }
@@ -259,45 +240,14 @@ async function handleActionIntent(
   const missing = required.filter(p => !entities[p.key]);
 
   if (missing.length > 0) {
-    const filledSlots: Record<string, string> = {};
-    const missingSlots: Record<string, string> = {};
-
-    for (const param of required) {
-      if (entities[param.key]) {
-        filledSlots[param.key] = entities[param.key];
-      } else {
-        missingSlots[param.key] = param.prompt;
-      }
-    }
-
-    if (entities.clientId) filledSlots.clientId = entities.clientId;
-    if (entities.serviceId) filledSlots.serviceId = entities.serviceId;
-
-    startSlotFilling(intent, intent, filledSlots, missingSlots);
-
     const firstMissing = missing[0];
     let promptText = firstMissing.prompt;
 
     if (intent === "agendar") {
       if (firstMissing.key === "serviceName") {
         const services = servicesStore.list(true);
-        if (services.length > 0) {
-          if (entities.clientId) {
-            const lastSvc = getLastServiceForClient(parseInt(entities.clientId));
-            if (lastSvc) {
-              const svcActive = servicesStore.list(true).find(s => s.id === lastSvc.serviceId);
-              if (svcActive) {
-                const others = services.filter(s => s.id !== svcActive.id).map(s => s.name).join(", ");
-                promptText = `Qual serviço para ${entities.clientName}? Último serviço: "${svcActive.name}" (${svcActive.durationMinutes}min - R$${svcActive.price.toFixed(2)}). Outros: ${others}`;
-              } else {
-                promptText = `Qual serviço? Disponíveis: ${services.map(s => `${s.name} (${s.durationMinutes}min - R$${s.price.toFixed(2)})`).join(", ")}`;
-              }
-            } else {
-              promptText = `Qual serviço para ${entities.clientName}? Disponíveis: ${services.map(s => `${s.name} (${s.durationMinutes}min - R$${s.price.toFixed(2)})`).join(", ")}`;
-            }
-          } else {
-            promptText = `Qual serviço? Disponíveis: ${services.map(s => `${s.name} (${s.durationMinutes}min - R$${s.price.toFixed(2)})`).join(", ")}`;
-          }
+        if (services.length > 0 && services.length <= 15) {
+          promptText = `Qual serviço deseja agendar? Temos: ${services.map(s => s.name).join(", ")}`;
         }
       } else if (firstMissing.key === "clientName") {
         const clients = clientsStore.list();
@@ -348,7 +298,6 @@ async function handleActionIntent(
         } catch { /* usar texto padrão */ }
       }
 
-      const { setPendingConfirmation } = await import("./agentContext");
       setPendingConfirmation(intent, entities, description);
 
       return {
@@ -450,173 +399,16 @@ async function handleConversationalIntent(
       );
     }
 
-    case "confirmar":
-    case "negar": {
-      return makeResponse(
-        "Não há nenhuma ação pendente no momento. O que gostaria de fazer?",
-        intent, entities, source, confidence,
-      );
-    }
-
     default: {
       if (isLLMConfigured() && agentConfig) {
         try {
-          let systemData: string | undefined;
-          if (agentConfig.fetchSystemData) {
-            systemData = await agentConfig.fetchSystemData(intent, entities);
-          }
-
-          const llmResponse = await generateResponse(
-            userMessage,
-            systemData,
-            agentConfig.businessContext,
-          );
-
-          return makeResponse(llmResponse, intent, entities, "llm", 0.9);
-        } catch (err) {
-          console.warn("[agentOrchestrator] LLM generation failed:", err);
-        }
+          const text = await generateResponse(userMessage, undefined, agentConfig.businessContext);
+          return makeResponse(text, intent, entities, "llm", 0.8);
+        } catch { /* fallback */ }
       }
       return handleLocalQuery(intent, entities, userMessage);
     }
   }
-}
-
-async function handlePendingQuestionResponse(text: string, question: any): Promise<AgentResponse> {
-  clearPendingQuestion();
-  const entities = { ...question.collectedParams, [question.missingParam]: text };
-  
-  if (question.toolId === "agendar") {
-    if (question.missingParam === "clientName") validateAndResolveClient(entities);
-    if (question.missingParam === "serviceName") validateAndResolveService(entities);
-  }
-  
-  return await handleActionIntent(question.toolId, entities, text, "nlu", 0.9);
-}
-
-async function handleConfirmationResponse(text: string, confirmation: any): Promise<AgentResponse> {
-  const q = normalize(text);
-  const isYes = ["sim", "pode", "ok", "confirmar", "com certeza", "claro", "bora"].some(w => q.includes(w));
-  const isNo = ["nao", "cancela", "parar", "nem pensar", "esquece"].some(w => q.includes(w));
-
-  clearPendingConfirmation();
-
-  if (isYes) {
-    if (agentConfig?.executeToolAction) {
-      try {
-        const result = await agentConfig.executeToolAction(confirmation.toolId, { ...confirmation.params, confirmed: "true" });
-        recordAction(confirmation.toolId, confirmation.description, confirmation.params, result);
-        return makeResponse(result, confirmation.toolId, confirmation.params, "nlu", 1.0);
-      } catch (err) {
-        return makeResponse(`Erro ao executar: ${err instanceof Error ? err.message : String(err)}`, confirmation.toolId, confirmation.params, "nlu", 1.0);
-      }
-    }
-  } else if (isNo) {
-    return makeResponse("Entendido. Ação cancelada.", "cancelar", {}, "nlu", 1.0);
-  }
-
-  return makeResponse("Não entendi se deseja confirmar. Pode responder 'sim' ou 'não'?", "outro", {}, "nlu", 0.5);
-}
-
-async function handleSlotFillingResponse(text: string, slotState: SlotFillingState): Promise<AgentResponse> {
-  const slotName = Object.keys(slotState.missingSlots)[0];
-  let slotValue = text;
-
-  if (slotState.toolId === "agendar") {
-    if (slotName === "clientName") {
-      const resolved = resolveClientFromStore(text);
-      if (resolved) {
-        slotValue = resolved.name;
-        slotState.filledSlots.clientId = String(resolved.id);
-      } else {
-        const clients = clientsStore.list();
-        let msg = `Não consegui encontrar o cliente "${text}" no sistema.`;
-        if (clients.length > 0 && clients.length <= 15) {
-          msg += ` Os clientes que tenho cadastrados são: ${clients.map(c => c.name).join(", ")}. Pode confirmar o nome?`;
-        } else {
-          msg += ` Pode conferir se o nome está correto ou se ele já está cadastrado?`;
-        }
-        addUserTurn(text, slotState.flowId, {});
-        addAgentTurn(msg, slotState.flowId);
-        return {
-          text: msg,
-          intent: slotState.flowId,
-          entities: { ...slotState.filledSlots },
-          actionExecuted: false,
-          awaitingConfirmation: false,
-          awaitingInput: true,
-          missingParam: slotName,
-          source: "nlu",
-          confidence: 0.9,
-        };
-      }
-    } else if (slotName === "serviceName") {
-      const resolved = resolveServiceFromStore(text);
-      if (resolved) {
-        slotValue = resolved.name;
-        slotState.filledSlots.serviceId = String(resolved.id);
-      } else {
-        const services = servicesStore.list(true);
-        let msg = `Ainda não tenho o serviço "${text}" cadastrado.`;
-        if (services.length > 0) {
-          msg += ` Atualmente oferecemos: ${services.map(s => `${s.name} (R$${s.price})`).join(", ")}. Qual deles você deseja?`;
-        } else {
-          msg += ` Parece que não há serviços ativos no momento.`;
-        }
-        addUserTurn(text, slotState.flowId, {});
-        addAgentTurn(msg, slotState.flowId);
-        return {
-          text: msg,
-          intent: slotState.flowId,
-          entities: { ...slotState.filledSlots },
-          actionExecuted: false,
-          awaitingConfirmation: false,
-          awaitingInput: true,
-          missingParam: slotName,
-          source: "nlu",
-          confidence: 0.9,
-        };
-      }
-    }
-  }
-
-  const remaining = fillSlot(slotName, slotValue);
-  addUserTurn(text, slotState.flowId, { [slotName]: slotValue });
-
-  if (Object.keys(remaining).length > 0) {
-    const nextEntry = Object.entries(remaining)[0];
-    const [nextSlotName, nextSlotPrompt] = nextEntry;
-    let promptText = nextSlotPrompt as string;
-
-    if (isLLMConfigured() && agentConfig) {
-      try {
-        const filled = { ...slotState.filledSlots, [slotName]: text };
-        const filledDesc = Object.entries(filled).map(([k, v]) => `${k}="${v}"`).join(", ");
-        promptText = await generateResponse(
-          `Coletando dados para "${slotState.flowId}". Já temos: ${filledDesc}. Agora precisa de "${nextSlotName}". Pergunta curta e natural:`,
-          undefined,
-          agentConfig.businessContext,
-        );
-      } catch { /* usar prompt padrão */ }
-    }
-
-    addAgentTurn(promptText, slotState.flowId);
-    return {
-      text: promptText,
-      intent: slotState.flowId,
-      entities: { ...slotState.filledSlots, [slotName]: text },
-      actionExecuted: false,
-      awaitingConfirmation: false,
-      awaitingInput: true,
-      missingParam: nextSlotName,
-      source: "nlu",
-      confidence: 0.9,
-    };
-  }
-
-  clearSlotFilling();
-  const allParams = { ...slotState.filledSlots, [slotName]: text };
-  return await handleActionIntent(slotState.flowId, allParams, text, "nlu", 0.9);
 }
 
 // ─── Helpers Internos ──────────────────────────────────────
@@ -644,14 +436,15 @@ function validateAndResolveService(entities: Record<string, string>) {
 }
 
 function classifyLocally(text: string): { intent: string; entities: Record<string, string>; confidence: number } {
-  const { classifyIntent: localClassify } = require("./agentNLU");
+  const { getBestIntent: localClassify } = require("./agentNLU");
   const result = localClassify(text);
   
-  const confidenceMap = { high: 0.9, medium: 0.6, low: 0.3 };
+  if (!result) return { intent: "outro", entities: {}, confidence: 0 };
+  
   return {
     intent: result.intent,
     entities: {},
-    confidence: confidenceMap[result.confidence as keyof typeof confidenceMap] || 0.1,
+    confidence: result.confidence === "high" ? 0.9 : result.confidence === "medium" ? 0.6 : 0.3,
   };
 }
 
@@ -764,7 +557,7 @@ function getLastServiceForClient(clientId: number): { serviceId: number; name: s
 }
 
 function handleLocalQuery(intent: string, entities: Record<string, string>, userMessage: string): AgentResponse {
-  const msg = "Desculpe, não entendi bem. Pode reformular? Tente algo como: 'Quais agendamentos de hoje?' ou 'Cancela o horário das 14h'.";
+  const msg = "Desculpe, não entendi bem. Pode reformular? Tente algo como: 'Quais agendamentos de hoje?' ou 'Agendar corte para amanhã'.";
   return makeResponse(msg, intent, entities, "fallback", 0.2);
 }
 
@@ -809,7 +602,6 @@ function getRequiredParams(intent: string): RequiredParam[] {
 
 export function resetAgent(): void { resetConversation(); }
 export function updateCurrentPage(page: string): void { setCurrentPage(page); }
-export function getDebugContext(): string { return getContextSummaryForPrompt(); }
 
 interface RequiredParam {
   key: string;
