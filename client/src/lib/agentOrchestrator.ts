@@ -645,8 +645,8 @@ async function handleConversationalIntent(
 
       let text = `${greeting}! Como posso ajudar com a agenda?`;
 
-      // Se LLM disponível, resposta mais natural
-      if (isLLMConfigured() && agentConfig?.alwaysUseLLM) {
+      // Usar LLM se disponível (tanto alwaysUseLLM quanto llmAsFallback)
+      if (isLLMConfigured() && agentConfig) {
         try {
           text = await generateResponse(userMessage, undefined, agentConfig.businessContext);
           source = "llm";
@@ -686,31 +686,94 @@ async function handleConversationalIntent(
     }
 
     default: {
-      // Para intents de consulta ou não classificados — usar LLM se disponível
+      // ── CORREÇÃO: buscar dados do sistema ANTES de tentar o LLM ──────────────
+      // Isso garante que mesmo se o LLM falhar, podemos responder com dados reais.
+      let systemData: string | undefined;
+      if (agentConfig?.fetchSystemData) {
+        try {
+          systemData = await agentConfig.fetchSystemData(intent, entities);
+        } catch (err) {
+          console.warn("[agentOrchestrator] fetchSystemData failed:", err);
+        }
+      }
+
+      // Tentar LLM com os dados do sistema
       if (isLLMConfigured() && agentConfig) {
         try {
-          // Buscar dados do sistema se callback disponível
-          let systemData: string | undefined;
-          if (agentConfig.fetchSystemData) {
-            systemData = await agentConfig.fetchSystemData(intent, entities);
-          }
-
           const llmResponse = await generateResponse(
             userMessage,
             systemData,
             agentConfig.businessContext,
           );
-
           return makeResponse(llmResponse, intent, entities, "llm", confidence);
         } catch (err) {
           console.warn("[agentOrchestrator] LLM response failed:", err);
         }
       }
 
-      // Fallback local para consultas comuns
+      // ── FALLBACK COM DADOS REAIS (sem LLM) ───────────────────────────────────
+      // Se o LLM falhou mas temos dados do sistema, formatar e exibir diretamente.
+      if (systemData && systemData.trim()) {
+        return makeResponse(
+          formatSystemDataResponse(intent, entities, systemData),
+          intent, entities, "fallback", confidence,
+        );
+      }
+
+      // Fallback local genérico
       return handleLocalQuery(intent, entities, userMessage);
     }
   }
+}
+
+/**
+ * Formata dados brutos do sistema em resposta legível quando o LLM não está disponível.
+ */
+function formatSystemDataResponse(
+  intent: string,
+  entities: Record<string, string>,
+  systemData: string,
+): string {
+  try {
+    // Tentar extrair dados JSON embutidos na string
+    const jsonMatch = systemData.match(/:\s*(\[[\s\S]*\]|\{[\s\S]*\})/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[1]);
+
+      if (intent === "ver_agendamentos" || intent === "ver_financeiro") {
+        if (Array.isArray(parsed) && parsed.length === 0) {
+          const dateLabel = entities.date === "amanha" ? "amanhã" : entities.date ?? "hoje";
+          return `Nenhum agendamento encontrado para ${dateLabel}.`;
+        }
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const lines = parsed.map((a: any) =>
+            `• ${a.hora ?? a.time ?? ""} — ${a.cliente ?? a.clientName ?? ""} (${a.servicos ?? a.services ?? ""})`
+          );
+          return `Agendamentos encontrados:\n${lines.join("\n")}`;
+        }
+      }
+
+      if (intent === "ver_clientes" || intent === "buscar_cliente") {
+        if (Array.isArray(parsed) && parsed.length === 0) {
+          return entities.clientName
+            ? `Nenhum cliente encontrado com o nome "${entities.clientName}".`
+            : "Nenhum cliente cadastrado.";
+        }
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const lines = parsed.map((c: any) => `• ${c.nome ?? c.name} — ${c.telefone ?? c.phone ?? ""}`);
+          return `Clientes encontrados:\n${lines.join("\n")}`;
+        }
+      }
+    }
+  } catch { /* fallback para exibir dados brutos */ }
+
+  // Se não conseguiu parsear, exibir dados brutos limpos
+  return systemData
+    .replace(/^[^:]+:\s*/, "") // Remove prefixo "Clientes (N): "
+    .replace(/[\[\]{}"]/g, "")
+    .replace(/,/g, "\n•")
+    .trim()
+    .slice(0, 500); // Limitar tamanho
 }
 
 // ─── Handlers de estados pendentes ─────────────────────────
