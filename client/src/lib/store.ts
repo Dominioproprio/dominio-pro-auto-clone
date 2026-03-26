@@ -1,7 +1,7 @@
 /**
- * store.ts — Supabase edition
+ * store.ts — Supabase edition com carregamento recursivo
  * Mesma API pública do store localStorage, agora com banco na nuvem.
- * Cache em memória mantém compatibilidade com código síncrono existente.
+ * Implementa busca em lotes para superar o limite de 1000 registros do Supabase.
  */
 
 import { supabase } from "./supabase";
@@ -28,7 +28,7 @@ export interface Service {
   description: string | null;
   durationMinutes: number;
   price: number;
-  materialCostPercent: number; // % do valor do serviço descontado antes da comissão
+  materialCostPercent: number;
   color: string;
   active: boolean;
   createdAt: string;
@@ -52,7 +52,7 @@ export interface AppointmentService {
   price: number;
   durationMinutes: number;
   color: string;
-  materialCostPercent: number; // copiado do serviço no momento do agendamento
+  materialCostPercent: number;
 }
 
 export interface Appointment {
@@ -152,6 +152,37 @@ async function addAuditLog(entityType: string, entityId: number, action: string,
   await supabase.from("audit_logs").insert({ entity_type: entityType, entity_id: entityId, action, description, user_name: "Admin" });
 }
 
+// ─── Função de Busca em Lotes (Paginação Recursiva) ───────
+
+async function fetchAllFromTable(tableName: string, orderBy: string = "id"): Promise<any[]> {
+  let allData: any[] = [];
+  let from = 0;
+  let to = 999;
+  let hasMore = true;
+
+  while (hasMore) {
+    const { data, error } = await supabase
+      .from(tableName)
+      .select("*")
+      .order(orderBy)
+      .range(from, to);
+
+    if (error) throw error;
+    if (!data || data.length === 0) {
+      hasMore = false;
+    } else {
+      allData = [...allData, ...data];
+      if (data.length < 1000) {
+        hasMore = false;
+      } else {
+        from += 1000;
+        to += 1000;
+      }
+    }
+  }
+  return allData;
+}
+
 // ─── Employees ───────────────────────────────────────────
 
 export const employeesStore = {
@@ -159,9 +190,8 @@ export const employeesStore = {
     return activeOnly ? cache.employees.filter(e => e.active) : [...cache.employees];
   },
   async fetchAll(): Promise<Employee[]> {
-    const { data, error } = await supabase.from("employees").select("*").order("id");
-    if (error) throw error;
-    cache.employees = (data ?? []).map(toEmployee);
+    const data = await fetchAllFromTable("employees", "id");
+    cache.employees = data.map(toEmployee);
     return cache.employees;
   },
   async create(data: Omit<Employee, "id" | "createdAt">): Promise<Employee> {
@@ -206,9 +236,8 @@ export const servicesStore = {
     return activeOnly ? cache.services.filter(s => s.active) : [...cache.services];
   },
   async fetchAll(): Promise<Service[]> {
-    const { data, error } = await supabase.from("services").select("*").order("id");
-    if (error) throw error;
-    cache.services = (data ?? []).map(toService);
+    const data = await fetchAllFromTable("services", "id");
+    cache.services = data.map(toService);
     return cache.services;
   },
   async create(data: Omit<Service, "id" | "createdAt">): Promise<Service> {
@@ -243,10 +272,8 @@ export const servicesStore = {
 export const clientsStore = {
   list(): Client[] { return [...cache.clients]; },
   async fetchAll(): Promise<Client[]> {
-    // Busca todos os clientes sem limite de paginação do Supabase (padrão 1000)
-    const { data, error } = await supabase.from("clients").select("*").order("name");
-    if (error) throw error;
-    cache.clients = (data ?? []).map(toClient);
+    const data = await fetchAllFromTable("clients", "name");
+    cache.clients = data.map(toClient);
     return cache.clients;
   },
   async create(data: Omit<Client, "id" | "createdAt">): Promise<Client> {
@@ -292,10 +319,8 @@ export const appointmentsStore = {
     return list;
   },
   async fetchAll(): Promise<Appointment[]> {
-    // Busca todos os agendamentos sem limite
-    const { data, error } = await supabase.from("appointments").select("*").order("start_time");
-    if (error) throw error;
-    cache.appointments = (data ?? []).map(toAppointment);
+    const data = await fetchAllFromTable("appointments", "start_time");
+    cache.appointments = data.map(toAppointment);
     return cache.appointments;
   },
   async create(data: Omit<Appointment, "id" | "createdAt">): Promise<Appointment> {
@@ -376,9 +401,8 @@ export const cashEntriesStore = {
     return sessionId ? cache.cashEntries.filter(e => e.sessionId === sessionId) : [...cache.cashEntries];
   },
   async fetchAll(): Promise<CashEntry[]> {
-    const { data, error } = await supabase.from("cash_entries").select("*").order("created_at", { ascending: false });
-    if (error) throw error;
-    cache.cashEntries = (data ?? []).map(toCashEntry);
+    const data = await fetchAllFromTable("cash_entries", "created_at");
+    cache.cashEntries = data.map(toCashEntry);
     return cache.cashEntries;
   },
   async create(data: Omit<CashEntry, "id" | "createdAt">): Promise<CashEntry> {
@@ -471,9 +495,8 @@ export const auditStore = {
     return filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   },
   async fetchAll(): Promise<AuditLog[]> {
-    const { data, error } = await supabase.from("audit_logs").select("*").order("created_at", { ascending: false }).limit(500);
-    if (error) throw error;
-    cache.auditLogs = (data ?? []).map(toAuditLog);
+    const data = await fetchAllFromTable("audit_logs", "created_at");
+    cache.auditLogs = data.map(toAuditLog);
     return cache.auditLogs;
   },
 };
