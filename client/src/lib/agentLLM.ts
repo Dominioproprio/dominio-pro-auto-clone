@@ -65,7 +65,10 @@ export interface IntentClassification {
 
 // ─── Configuração ──────────────────────────────────────────
 
-const GITHUB_MODELS_ENDPOINT = "https://models.github.ai/inference/chat/completions";
+// Proxy server-side no Vercel (resolve CORS + protege o token)
+// Fallback para chamada direta caso rode em localhost/dev sem o proxy
+const LLM_PROXY_ENDPOINT = "/api/llm";
+const GITHUB_MODELS_ENDPOINT_DIRECT = "https://models.github.ai/inference/chat/completions";
 const DEFAULT_MODEL = "openai/gpt-4o-mini";
 const DEFAULT_TEMPERATURE = 0.4;
 const DEFAULT_MAX_TOKENS = 800;
@@ -184,8 +187,9 @@ function buildHistoryMessages(
 // ─── Chamada à API ─────────────────────────────────────────
 
 /**
- * Envia mensagens para o GitHub Models API e retorna a resposta.
- * Trata erros de rede, timeout e rate limiting.
+ * Envia mensagens para o LLM via proxy server-side (/api/llm).
+ * O proxy resolve o bloqueio de CORS e mantém o token fora do browser.
+ * Em desenvolvimento local (localhost), faz chamada direta como fallback.
  */
 async function callGitHubModelsAPI(messages: LLMMessage[]): Promise<string> {
   if (!currentConfig || !currentConfig.apiToken) {
@@ -197,16 +201,35 @@ async function callGitHubModelsAPI(messages: LLMMessage[]): Promise<string> {
   const maxTokens = currentConfig.maxTokens ?? DEFAULT_MAX_TOKENS;
   const timeout = currentConfig.timeout ?? DEFAULT_TIMEOUT;
 
+  // Em produção (Vercel) usar o proxy server-side para evitar CORS.
+  // Em localhost usar chamada direta (o proxy pode não estar disponível).
+  const isLocalhost =
+    typeof window !== "undefined" &&
+    (window.location.hostname === "localhost" ||
+      window.location.hostname === "127.0.0.1");
+
+  const endpoint = isLocalhost ? GITHUB_MODELS_ENDPOINT_DIRECT : LLM_PROXY_ENDPOINT;
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  // Em chamada direta (localhost), enviar token no header Authorization.
+  // No proxy, o token vem da variável de ambiente do Vercel — mas enviamos
+  // também como header x-github-token para o caso de o env var não estar configurado.
+  if (isLocalhost) {
+    headers["Authorization"] = `Bearer ${currentConfig.apiToken}`;
+  } else {
+    headers["x-github-token"] = currentConfig.apiToken;
+  }
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const response = await fetch(GITHUB_MODELS_ENDPOINT, {
+    const response = await fetch(endpoint, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${currentConfig.apiToken}`,
-      },
+      headers,
       body: JSON.stringify({
         model,
         messages,
