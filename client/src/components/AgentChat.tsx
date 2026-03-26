@@ -193,13 +193,8 @@ export default function AgentChat() {
 
     } catch (error) {
       console.error("Erro no Agente:", error);
-      const errorMsg: AgentMessage = {
-        id: `err_${Date.now()}`,
-        role: "agent",
-        content: "Desculpe, tive um problema técnico ao processar sua mensagem. Por favor, tente novamente em instantes.",
-        timestamp: Date.now(),
-      };
-      setMessages(prev => [...prev, errorMsg]);
+      setIsTyping(false);
+      return;
     } finally {
       setIsTyping(false);
     }
