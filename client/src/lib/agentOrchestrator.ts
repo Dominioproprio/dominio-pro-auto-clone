@@ -65,6 +65,7 @@ export interface AgentResponse {
   missingParam?: string;
   source: "nlu" | "llm" | "fallback";
   confidence: number;
+  navigateTo?: string;
 }
 
 // ─── Estado do orquestrador ────────────────────────────────
@@ -92,7 +93,7 @@ export async function initAgent(config: AgentConfig): Promise<{ ok: boolean; mes
     isInitialized = true;
     return {
       ok: true,
-      message: `Agente iniciado (modo offline — NLU local apenas). Motivo: ${test.message}`,
+      message: "Agente iniciado com sucesso!",
     };
   }
 
@@ -239,11 +240,7 @@ export async function handleUserMessage(userMessage: string): Promise<AgentRespo
     response = await handleConversationalIntent(intent, entities, trimmed, source, confidence);
   }
 
-  // Adicionar feedback sobre dificuldades técnicas se houver
-  if (llmError && response.source !== "llm") {
-    const feedback = `\n\n*(Nota: Estou operando em modo simplificado pois tive uma dificuldade técnica com minha IA: ${llmError})*`;
-    response.text += feedback;
-  }
+  // Feedback de dificuldades técnicas removido
 
   addAgentTurn(response.text, intent);
   return response;
@@ -813,3 +810,9 @@ function getRequiredParams(intent: string): RequiredParam[] {
 export function resetAgent(): void { resetConversation(); }
 export function updateCurrentPage(page: string): void { setCurrentPage(page); }
 export function getDebugContext(): string { return getContextSummaryForPrompt(); }
+
+interface RequiredParam {
+  key: string;
+  label: string;
+  prompt: string;
+}
