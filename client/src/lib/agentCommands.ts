@@ -1,51 +1,71 @@
 /**
- * agentCommands.ts — Processamento de comandos diretos via texto.
- * Permite que o usuário use atalhos como "/agendar" ou comandos rápidos.
+ * agentCommands.ts — Parser de comandos em linguagem natural.
+ * Ajustado para NÃO interceptar agendamentos normais, permitindo que o agente inteligente processe.
  */
 
 export interface CommandResult {
-  ok: boolean;
+  understood: boolean;
+  type: "task_created" | "task_removed" | "task_list" | "task_not_found" | "help" | "unknown" | "info";
   message: string;
-  type: "task_created" | "task_removed" | "info" | "error";
 }
 
-/** Verifica se a mensagem é um comando de agendamento rápido */
-export function isScheduleCommand(text: string): boolean {
-  const q = text.toLowerCase().trim();
-  return q.startsWith("/") || q.startsWith("!") || q.includes("agendar") || q.includes("marcar");
+function normalize(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[?!.,;:]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-/** Processa comandos rápidos do usuário */
+// Só intercepta se for um comando de AVISO/RELATÓRIO recorrente
+function isRecurringAlertIntent(q: string): boolean {
+  const patterns = [
+    /me\s+avis[aeo]/,
+    /me\s+lembr[aeo]/,
+    /me\s+mostr[aeo]\s+todo/,
+    /tod[oa]\s+(dia|segunda|terca|quarta|quinta|sexta|sabado|domingo)/,
+    /todo\s+dia\s+\d+/,
+    /semanalmente/,
+    /mensalmente/,
+    /diariamente/,
+  ];
+  return patterns.some(p => p.test(q));
+}
+
 export function processCommand(text: string): CommandResult {
-  const q = text.toLowerCase().trim();
+  const q = normalize(text);
 
-  if (q.includes("ajuda") || q === "/help") {
+  // Comandos explícitos com barra
+  if (q === "/ajuda" || q === "/help") {
     return {
-      ok: true,
-      message: "Comandos disponíveis:\n- /agendar [serviço] [data] [hora]\n- /cancelar [data]\n- /clientes\n- /caixa",
-      type: "info"
+      understood: true,
+      type: "help",
+      message: "Comandos disponíveis:\n- /clientes\n- /caixa\n- Me avisa todo sábado o rendimento da semana",
     };
   }
 
-  if (q.includes("agendar") || q.startsWith("/agendar")) {
+  // Se for um comando de aviso recorrente
+  if (isRecurringAlertIntent(q)) {
     return {
-      ok: true,
-      message: "Entendido! Para agendar, por favor me informe o nome do cliente, o serviço e o horário desejado.",
-      type: "info"
+      understood: true,
+      type: "info",
+      message: "Entendido! Vou configurar esse aviso recorrente para você.",
     };
   }
 
-  if (q.includes("cancelar") || q.startsWith("/cancelar")) {
-    return {
-      ok: true,
-      message: "Para cancelar um agendamento, preciso saber a data ou o nome do cliente.",
-      type: "info"
-    };
-  }
-
+  // Para qualquer outra coisa (como agendar, marcar, etc), retorna NÃO entendido
+  // Isso permite que o agentOrchestrator.ts use a inteligência real (NLU/LLM)
   return {
-    ok: false,
-    message: "Comando não reconhecido. Tente /ajuda para ver as opções.",
-    type: "error"
+    understood: false,
+    type: "unknown",
+    message: "",
   };
+}
+
+export function isScheduleCommand(text: string): boolean {
+  const q = normalize(text);
+  // Só intercepta se começar com "/" ou for um aviso recorrente explícito
+  return q.startsWith("/") || isRecurringAlertIntent(q);
 }
