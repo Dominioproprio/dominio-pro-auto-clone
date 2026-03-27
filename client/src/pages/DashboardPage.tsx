@@ -1,14 +1,17 @@
 /**
  * DashboardPage — Visão geral do dia com métricas e acesso rápido.
  * Domínio Pro — design glassmorphism 2026.
+ *
+ * PERFORMANCE: usa fetchDashboardData() em vez de fetchAllData().
+ * Isso evita baixar milhares de clientes só para mostrar o contador.
  */
 import { useState, useEffect, useMemo } from "react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { useLocation } from "wouter";
 import {
-  employeesStore, clientsStore,
-  appointmentsStore, cashSessionsStore, fetchAllData,
+  employeesStore,
+  appointmentsStore, cashSessionsStore, fetchDashboardData,
   type Appointment,
 } from "@/lib/store";
 import {
@@ -102,6 +105,7 @@ export default function DashboardPage() {
   const [, setLocation] = useLocation();
   const [refreshKey, setRefreshKey] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [clientCount, setClientCount] = useState<number>(0);
   const accent = getAccent();
   const today = format(new Date(), "yyyy-MM-dd");
 
@@ -113,7 +117,14 @@ export default function DashboardPage() {
   })();
 
   useEffect(() => {
-    fetchAllData().then(() => { setRefreshKey(k => k + 1); setLoading(false); });
+    // fetchDashboardData: muito mais rápido — só carrega agendamentos do dia
+    // e faz COUNT de clientes sem baixar todos os registros
+    fetchDashboardData().then(({ clientCount: count }) => {
+      setClientCount(count);
+      setRefreshKey(k => k + 1);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+
     const onUpdate = () => setRefreshKey(k => k + 1);
     window.addEventListener("store_updated", onUpdate);
     window.addEventListener("cash_entry_auto_launched", onUpdate);
@@ -123,9 +134,8 @@ export default function DashboardPage() {
     };
   }, []);
 
-  const employees   = useMemo(() => employeesStore.list(true),                           [refreshKey]);
-  const apptToday   = useMemo(() => appointmentsStore.list({ date: today }),              [refreshKey, today]);
-  const allClients  = useMemo(() => clientsStore.list(),                                  [refreshKey]);
+  const employees   = useMemo(() => employeesStore.list(true),                              [refreshKey]);
+  const apptToday   = useMemo(() => appointmentsStore.list({ date: today }),                [refreshKey, today]);
   const cashSession = useMemo(() => cashSessionsStore.list().find(s => s.status === "open"), [refreshKey]);
 
   const totalHoje       = apptToday.length;
@@ -206,7 +216,7 @@ export default function DashboardPage() {
         <MetricCard icon={DollarSign} label="Faturamento hoje" value={`R$ ${faturamentoHoje.toFixed(0)}`}
           sub="serviços concluídos" color="#f59e0b"
           onClick={() => setLocation("/caixa")} />
-        <MetricCard icon={Users} label="Clientes" value={allClients.length}
+        <MetricCard icon={Users} label="Clientes" value={clientCount}
           sub="cadastrados" color="#3b82f6"
           onClick={() => setLocation("/clientes")} />
       </div>
@@ -231,7 +241,7 @@ export default function DashboardPage() {
           <p className="text-sm font-semibold text-white/70">Equipe hoje</p>
           <button onClick={() => setLocation("/funcionarios")}
             className="text-xs font-medium hover:opacity-80" style={{ color: accent }}>
-            Ver todos â†’
+            Ver todos →
           </button>
         </div>
         <div className="flex gap-3 overflow-x-auto pb-1">
@@ -286,7 +296,7 @@ export default function DashboardPage() {
           <p className="text-sm font-semibold text-white/70">Próximos agendamentos</p>
           <button onClick={() => setLocation("/agenda")}
             className="text-xs font-medium hover:opacity-80" style={{ color: accent }}>
-            Ver agenda â†’
+            Ver agenda →
           </button>
         </div>
         {proximos.length > 0 ? (
