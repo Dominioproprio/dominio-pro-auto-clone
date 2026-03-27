@@ -46,7 +46,7 @@ function AppContent() {
   const [accessEnabled, setAccessEnabled] = useState(isAccessControlEnabled);
   const [session, setSession]             = useState(getSession);
 
-  // ── INICIALIZAÇÃO DO AGENTE IA (ETAPA 2b) ──
+  // â”€â”€ INICIALIZAÇÃO DO AGENTE IA (ETAPA 2b) â”€â”€
   useEffect(() => {
     const setupIA = async () => {
       let token = localStorage.getItem("github_token");
@@ -62,7 +62,7 @@ function AppContent() {
             model: "openai/gpt-4o-mini",
             businessContext: "Domínio Pro - Sistema de gestão para barbearias e salões. Especializado em agendamentos, controle de caixa e relatórios.",
             llmAsFallback: true,
-            // ── Fornece dados reais do sistema para o LLM ──────────
+            // â”€â”€ Fornece dados reais do sistema para o LLM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             fetchSystemData: async (intent, entities) => {
               try {
                 const {
@@ -127,7 +127,7 @@ function AppContent() {
               }
             },
 
-            // ── Executa ações reais no sistema ─────────────────────
+            // â”€â”€ Executa acoes reais no sistema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             executeToolAction: async (toolId, params) => {
               try {
                 const {
