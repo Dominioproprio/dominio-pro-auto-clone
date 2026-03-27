@@ -46,23 +46,22 @@ function AppContent() {
   const [accessEnabled, setAccessEnabled] = useState(isAccessControlEnabled);
   const [session, setSession]             = useState(getSession);
 
-  // â”€â”€ INICIALIZAÇÃO DO AGENTE IA (ETAPA 2b) â”€â”€
+  // ── INICIALIZAÇÃO DO AGENTE IA ──
+  // O token GitHub é gerenciado pelo proxy server-side (/api/llm).
+  // Não é mais necessário pedir o token ao usuário.
   useEffect(() => {
     const setupIA = async () => {
-      let token = localStorage.getItem("github_token");
-      if (!token) {
-        token = prompt("🤖 Bem-vindo! Cole seu GitHub Token (PAT) para ativar a IA:");
-        if (token) localStorage.setItem("github_token", token);
-      }
+      // Usar token do localStorage se existir (compatibilidade),
+      // ou string vazia (o proxy usará GITHUB_TOKEN do Vercel env)
+      const token = localStorage.getItem("github_token") || "proxy";
 
-      if (token) {
-        try {
+      try {
           await initAgent({
             githubToken: token,
             model: "openai/gpt-4o-mini",
             businessContext: "Domínio Pro - Sistema de gestão para barbearias e salões. Especializado em agendamentos, controle de caixa e relatórios.",
             llmAsFallback: true,
-            // â”€â”€ Fornece dados reais do sistema para o LLM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // ── Fornece dados reais do sistema para o LLM ──────────
             fetchSystemData: async (intent, entities) => {
               try {
                 const {
@@ -127,7 +126,7 @@ function AppContent() {
               }
             },
 
-            // â”€â”€ Executa acoes reais no sistema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // ── Executa ações reais no sistema ─────────────────────
             executeToolAction: async (toolId, params) => {
               try {
                 const {
@@ -336,7 +335,6 @@ function AppContent() {
         } catch (e) {
           console.error("Erro ao inicializar Agente IA:", e);
         }
-      }
     };
     setupIA();
   }, []);
