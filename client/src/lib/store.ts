@@ -538,3 +538,63 @@ export async function fetchAllData(): Promise<void> {
     auditStore.fetchAll(),
   ]);
 }
+
+/**
+ * fetchDashboardData — Carrega APENAS os dados necessários para o Dashboard.
+ * Muito mais rápido que fetchAllData() porque:
+ *   - Agendamentos: só do dia atual (poucos registros)
+ *   - Clientes: apenas o COUNT via Supabase (sem baixar todos os registros)
+ *   - Funcionários e sessão de caixa: poucos registros, OK carregar tudo
+ *   - NÃO carrega: cashEntries, auditLogs (desnecessários no dashboard)
+ */
+export async function fetchDashboardData(): Promise<{ clientCount: number }> {
+  const today = new Date().toISOString().split("T")[0];
+
+  const [, , apptResult, , countResult] = await Promise.all([
+    // Funcionários (poucos registros)
+    employeesStore.fetchAll(),
+    // Serviços (poucos registros)
+    servicesStore.fetchAll(),
+    // Agendamentos só do dia atual
+    supabase
+      .from("appointments")
+      .select("*")
+      .gte("start_time", `${today}T00:00:00`)
+      .lte("start_time", `${today}T23:59:59`)
+      .order("start_time"),
+    // Sessão de caixa aberta
+    cashSessionsStore.fetchAll(),
+    // COUNT de clientes sem baixar todos
+    supabase
+      .from("clients")
+      .select("id", { count: "exact", head: true }),
+  ]);
+
+  // Popular cache de agendamentos com só os de hoje
+  if (apptResult.data && !apptResult.error) {
+    const mapped = apptResult.data.map((row: any) => ({
+      id: row.id,
+      clientName: row.client_name,
+      clientId: row.client_id,
+      employeeId: row.employee_id,
+      startTime: row.start_time,
+      endTime: row.end_time,
+      status: row.status,
+      totalPrice: row.total_price,
+      notes: row.notes,
+      paymentStatus: row.payment_status,
+      groupId: row.group_id,
+      services: row.services ?? [],
+      createdAt: row.created_at,
+    }));
+    // Merge no cache sem apagar agendamentos de outros dias já carregados
+    const otherDays = (cache as any).appointments.filter(
+      (a: any) => !a.startTime?.startsWith(today)
+    );
+    (cache as any).appointments = [...otherDays, ...mapped];
+  }
+
+  const clientCount = countResult.count ?? (cache as any).clients.length;
+  return { clientCount };
+}
+
