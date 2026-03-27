@@ -174,7 +174,7 @@ export default function DashboardPage() {
       {/* Saudação */}
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-sm text-white/40">{greeting} ðŸ‘‹</p>
+          <p className="text-sm text-white/40">{greeting} 👋</p>
           <h1 className="text-xl font-bold text-gradient mt-0.5">{salonName}</h1>
           <p className="text-xs text-white/30 mt-0.5 capitalize">
             {format(new Date(), "EEEE, d 'de' MMMM", { locale: ptBR })}
