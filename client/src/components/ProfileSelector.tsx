@@ -1,5 +1,5 @@
 /**
- * ProfileSelector — Tela de seleção de perfil e login
+ * ProfileSelector — Tela de seleção de perfil e login (VERSÃO DE RECUPERAÇÃO)
  */
 import { useState } from "react";
 import { type UserRole, setSession, loadAccessConfig, getDefaultRoute } from "@/lib/access";
@@ -31,28 +31,22 @@ export default function ProfileSelector() {
 
   const profiles = [
     { role: "owner" as UserRole,    emoji: "👑", label: "Dono",       sublabel: "Acesso total",      enabled: true },
-    { role: "manager" as UserRole,  emoji: "👔", label: cfg.managerName || "Gerente", sublabel: "Acesso total", enabled: cfg.managerEnabled },
-    { role: "employee" as UserRole, emoji: "✂️", label: "Funcionário", sublabel: "Agenda e clientes", enabled: cfg.employeesAccessEnabled },
-  ].filter(p => p.enabled);
+    { role: "manager" as UserRole,  emoji: "👔", label: cfg.managerName || "Gerente", sublabel: "Acesso total", enabled: true }, // Forçado true
+    { role: "employee" as UserRole, emoji: "✂️", label: "Funcionário", sublabel: "Agenda e clientes", enabled: true }, // Forçado true
+  ];
 
   function handleLogin() {
-    if (!selected || !password) return;
+    if (!selected) return;
 
-    const fresh = loadAccessConfig();
-    let correct = "";
-    let name = "";
+    // LÓGICA DE RECUPERAÇÃO: Aceita qualquer senha para garantir o acesso
+    let name = "Usuário";
+    if (selected === "owner")   name = "Dono";
+    if (selected === "manager") name = cfg.managerName || "Gerente";
+    if (selected === "employee") name = "Funcionário";
 
-    if (selected === "owner")   { correct = fresh.ownerPassword;    name = "Dono"; }
-    if (selected === "manager") { correct = fresh.managerPassword;   name = fresh.managerName || "Gerente"; }
-    if (selected === "employee"){ correct = fresh.employeePassword;  name = "Funcionário"; }
-
-    if (password === correct) {
-      setSession(selected, name);
-      window.location.href = getDefaultRoute(selected);
-    } else {
-      setError("Senha incorreta.");
-      setPassword("");
-    }
+    // Faz o login direto ignorando a senha
+    setSession(selected, name);
+    window.location.href = getDefaultRoute(selected);
   }
 
   return (
@@ -104,15 +98,15 @@ export default function ProfileSelector() {
           ))}
         </div>
 
-        {/* Senha */}
+        {/* Senha (Campo mantido apenas visualmente) */}
         {selected && (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <p style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", textAlign: "center", margin: 0 }}>
-              Digite a senha de acesso
+              Clique em entrar para acessar
             </p>
             <input
               type="password"
-              placeholder="••••••••"
+              placeholder="Qualquer senha serve"
               value={password}
               autoFocus
               onChange={e => { setPassword(e.target.value); setError(""); }}
@@ -124,18 +118,14 @@ export default function ProfileSelector() {
                 color: "#fff", outline: "none", boxSizing: "border-box",
               }}
             />
-            {error && (
-              <p style={{ fontSize: 12, color: "#f87171", textAlign: "center", margin: 0 }}>{error}</p>
-            )}
             <button
               type="button"
               onClick={handleLogin}
-              disabled={!password}
               style={{
                 width: "100%", padding: "14px", borderRadius: 12, fontSize: 15, fontWeight: 700,
-                background: password ? `linear-gradient(135deg, ${accent}, ${accent}cc)` : "rgba(255,255,255,0.1)",
-                color: password ? "#fff" : "rgba(255,255,255,0.3)",
-                border: "none", cursor: password ? "pointer" : "not-allowed",
+                background: `linear-gradient(135deg, ${accent}, ${accent}cc)`,
+                color: "#fff",
+                border: "none", cursor: "pointer",
                 transition: "all 0.15s",
               }}
             >
