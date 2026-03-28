@@ -151,7 +151,8 @@ export function saveAccessConfig(access: AccessConfig): void {
 }
 
 // Verifica se o controle de acesso está ativado
+// ALTERAÇÃO: Retornando false para desativar a trava de senha temporariamente
 export function isAccessControlEnabled(): boolean {
-  const cfg = loadAccessConfig();
-  return cfg.ownerPassword.length >= 4;
+  return false; 
 }
+
