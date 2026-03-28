@@ -43,7 +43,8 @@ function AppContent() {
   const [location]                = useLocation();
   const accent = getAccent();
 
-  const [accessEnabled, setAccessEnabled] = useState(isAccessControlEnabled);
+  // ALTERAÇÃO DEFINITIVA: Força o controle de acesso a começar desativado (false)
+  const [accessEnabled, setAccessEnabled] = useState(false); 
   const [session, setSession]             = useState(getSession);
 
   // ── INICIALIZAÇÃO DO AGENTE IA ──
@@ -225,7 +226,6 @@ function AppContent() {
     setupIA();
   }, []);
 
-  // ... restante do componente AppContent ...
   return (
     <ThemeProvider>
       <TooltipProvider>
