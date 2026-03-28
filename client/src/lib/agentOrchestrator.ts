@@ -113,35 +113,46 @@ let isInitialized = false;
  * Deve ser chamado antes de usar handleUserMessage().
  */
 export async function initAgent(config: AgentConfig): Promise<{ ok: boolean; message: string }> {
-  agentConfig = config;
+  // 1. Resolve o token: Prioridade para o que vem do Vercel se o passado for "proxy" ou vazio
+  const token = (config.githubToken && config.githubToken !== "proxy") 
+    ? config.githubToken 
+    : (process.env.NEXT_PUBLIC_GITHUB_TOKEN || "");
 
-  // Configurar LLM
+  // 2. Atualiza a configuração local com o token resolvido
+  agentConfig = { ...config, githubToken: token };
+
+  // 3. Configura o módulo de LLM (agentLLM.ts)
   configureLLM({
-    apiToken: config.githubToken,
+    apiToken: token,
     model: config.model ?? "openai/gpt-4o-mini",
     temperature: 0.4,
     maxTokens: 800,
   });
 
-  // Testar conexão
-  const test = await testConnection();
-  isInitialized = test.ok;
+  try {
+    // 4. Testa a conexão com o GitHub Models
+    const test = await testConnection();
+    isInitialized = true; // Marcamos como inicializado para permitir NLU local mesmo se o teste falhar
 
-  if (!test.ok) {
-    console.warn("[agentOrchestrator] LLM não disponível, usando apenas NLU local:", test.message);
-    // Ainda funciona — apenas sem LLM
-    isInitialized = true;
+    if (!test.ok) {
+      console.warn("[agentOrchestrator] LLM indisponível (usando NLU local):", test.message);
+      return {
+        ok: true,
+        message: `Agente em modo offline. Erro: ${test.message}`,
+      };
+    }
+
     return {
       ok: true,
-      message: `Agente iniciado (modo offline — NLU local apenas). Motivo: ${test.message}`,
+      message: `Agente online! Modelo: ${test.model}`,
     };
+  } catch (err) {
+    console.error("[agentOrchestrator] Erro na inicialização:", err);
+    isInitialized = true;
+    return { ok: true, message: "Agente em modo de segurança." };
   }
-
-  return {
-    ok: true,
-    message: `Agente iniciado com sucesso! Modelo: ${test.model}`,
-  };
 }
+
 
 /** Verifica se o agente está pronto */
 export function isAgentReady(): boolean {
