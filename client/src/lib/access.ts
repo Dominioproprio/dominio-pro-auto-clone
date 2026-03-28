@@ -123,10 +123,10 @@ export interface AccessConfig {
 
 export const DEFAULT_ACCESS_CONFIG: AccessConfig = {
   ownerPassword: "",
-  managerEnabled: false,
+  managerEnabled: true, // Alterado para true por padrão
   managerName: "Gerente",
   managerPassword: "",
-  employeesAccessEnabled: false,
+  employeesAccessEnabled: true, // Alterado para true por padrão
   employeePassword: "",
 };
 
@@ -135,10 +135,21 @@ export function loadAccessConfig(): AccessConfig {
     const s = localStorage.getItem("salon_config");
     if (s) {
       const c = JSON.parse(s);
-      return { ...DEFAULT_ACCESS_CONFIG, ...c.access };
+      // Forçamos a habilitação dos perfis para garantir que apareçam na tela de login
+      return { 
+        ...DEFAULT_ACCESS_CONFIG, 
+        ...c.access,
+        managerEnabled: true,
+        employeesAccessEnabled: true
+      };
     }
   } catch { /* ignore */ }
-  return { ...DEFAULT_ACCESS_CONFIG };
+  
+  return { 
+    ...DEFAULT_ACCESS_CONFIG,
+    managerEnabled: true,
+    employeesAccessEnabled: true
+  };
 }
 
 export function saveAccessConfig(access: AccessConfig): void {
@@ -155,4 +166,3 @@ export function saveAccessConfig(access: AccessConfig): void {
 export function isAccessControlEnabled(): boolean {
   return false; 
 }
-
