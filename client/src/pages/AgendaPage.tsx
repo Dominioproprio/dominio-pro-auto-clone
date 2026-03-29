@@ -15,7 +15,7 @@ import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover
 import AppointmentModal from "@/components/AppointmentModal";
 import { cn } from "@/lib/utils";
 import {
-  employeesStore, servicesStore, appointmentsStore,
+  employeesStore, servicesStore, appointmentsStore, fetchAllData,
   type Appointment,
 } from "@/lib/store";
 
@@ -394,10 +394,17 @@ export default function AgendaPage() {
   const [refreshKey, setRefreshKey]       = useState(0);
   const [refreshing, setRefreshing]       = useState(false);
 
-  const handleRefresh = useCallback(() => {
-    // Recarrega o app inteiro — limpa cache in-memory e busca tudo do zero no Supabase
+  const handleRefresh = useCallback(async () => {
     setRefreshing(true);
-    window.location.reload();
+    try {
+      // Rebusca todos os dados do Supabase sem recarregar a página
+      await fetchAllData();
+      setRefreshKey(k => k + 1);
+    } catch (err) {
+      console.error("Erro ao atualizar:", err);
+    } finally {
+      setRefreshing(false);
+    }
   }, []);
 
   // Horários/slots dinâmicos vindos de Configurações
