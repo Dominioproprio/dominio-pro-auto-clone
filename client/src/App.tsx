@@ -19,45 +19,68 @@ import BackupPage from "./pages/BackupPage";
 import ConfiguracoesPage from "./pages/ConfiguracoesPage";
 import FerramentasClientesPage from "./pages/FerramentasClientesPage";
 import { useState, useEffect } from "react";
-
-// Tente mudar estes caminhos se o erro persistir:
 import { getSession, getDefaultRoute } from "./lib/access";
-import { fetchAllData, appointmentsStore, clientsStore } from "./lib/store";
-import { initAgent } from "./lib/agentOrchestrator";
-
 import ProfileSelector from "./components/ProfileSelector";
 import AgentChat from "./components/AgentChat";
+
+import { fetchAllData } from "./lib/store";
+
+// --- IMPORTAÇÃO DO AGENTE ---
+import { initAgentV2 } from "./lib/agentV2";
+
+function getAccent() {
+  try {
+    const s = localStorage.getItem("salon_config");
+    if (s) return JSON.parse(s).accentColor || "#ec4899";
+  } catch { /* ignore */ }
+  return "#ec4899";
+}
 
 function AppContent() {
   const [, setLocation] = useLocation();
   const [session, setSession] = useState(getSession);
 
-  // CARREGAMENTO CRÍTICO DOS DADOS
+  // ── CARREGAR DADOS DO SISTEMA AO INICIAR ──
   useEffect(() => {
-    const load = async () => {
-      try {
-        await fetchAllData();
-        console.log("Dados carregados com sucesso");
-      } catch (err) {
-        console.error("Erro crítico ao carregar banco de dados:", err);
-      }
-    };
-    load();
+    fetchAllData().catch(err => console.error("Erro ao carregar dados:", err));
   }, []);
 
-  // INICIALIZAÇÃO DO AGENTE
+  // ── INICIALIZAÇÃO DO AGENTE IA v2 ──
   useEffect(() => {
-    const token = localStorage.getItem("github_token") || process.env.NEXT_PUBLIC_GITHUB_TOKEN || "proxy";
-    initAgent({
-      githubToken: token,
-      model: "openai/gpt-4o-mini",
-      businessContext: "Domínio Pro",
-      llmAsFallback: true,
-      fetchSystemData: async (intent) => {
-        if (intent.includes("cliente")) return JSON.stringify(clientsStore.list().slice(0, 5));
-        return "";
+    const setupIA = async () => {
+      let token = localStorage.getItem("github_token");
+
+      if (!token) {
+        token = window.prompt(
+          "Configure seu GitHub Token para ativar o Agente IA:\n" +
+          "Acesse: github.com/settings/tokens → Fine-grained → Models: Read"
+        );
+        if (token?.trim()) {
+          localStorage.setItem("github_token", token.trim());
+          token = token.trim();
+        }
       }
-    });
+
+      if (!token) return;
+
+      try {
+        let salonName = "Domínio Pro";
+        try {
+          const cfg = localStorage.getItem("salon_config");
+          if (cfg) salonName = JSON.parse(cfg).salonName || salonName;
+        } catch {}
+
+        initAgentV2({
+          apiToken: token,
+          model: "openai/gpt-4o-mini",
+          salonName,
+          businessContext: `${salonName} — Sistema de gestão para salões e barbearias.`,
+        });
+      } catch (err) {
+        console.error("Erro ao inicializar Agente IA:", err);
+      }
+    };
+    setupIA();
   }, []);
 
   return (
@@ -71,9 +94,11 @@ function AppContent() {
               setLocation(getDefaultRoute(p.role));
             }} />
           </Route>
+          
           <Route path="/">
             {!session ? <Redirect to="/login" /> : <Redirect to={getDefaultRoute(session.role)} />}
           </Route>
+
           <DominioLayout>
             <Switch>
               <Route path="/dashboard" component={DashboardPage} />
@@ -99,10 +124,12 @@ function AppContent() {
   );
 }
 
-export default function App() {
+function App() {
   return (
     <ErrorBoundary>
       <AppContent />
     </ErrorBoundary>
   );
 }
+
+export default App;
