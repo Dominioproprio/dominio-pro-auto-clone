@@ -19,83 +19,45 @@ import BackupPage from "./pages/BackupPage";
 import ConfiguracoesPage from "./pages/ConfiguracoesPage";
 import FerramentasClientesPage from "./pages/FerramentasClientesPage";
 import { useState, useEffect } from "react";
+
+// Tente mudar estes caminhos se o erro persistir:
 import { getSession, getDefaultRoute } from "./lib/access";
-import ProfileSelector from "./components/ProfileSelector";
-import AgentChat from "./components/AgentChat";
-
-// --- IMPORTAÇÕES DO BANCO DE DADOS (RESTAURADAS PARA O TOPO) ---
-import { 
-  appointmentsStore, 
-  clientsStore, 
-  servicesStore, 
-  employeesStore, 
-  cashEntriesStore,
-  fetchAllData 
-} from "./lib/store";
-
-// --- IMPORTAÇÃO DO AGENTE ---
+import { fetchAllData, appointmentsStore, clientsStore } from "./lib/store";
 import { initAgent } from "./lib/agentOrchestrator";
 
-function getAccent() {
-  try {
-    const s = localStorage.getItem("salon_config");
-    if (s) return JSON.parse(s).accentColor || "#ec4899";
-  } catch { /* ignore */ }
-  return "#ec4899";
-}
+import ProfileSelector from "./components/ProfileSelector";
+import AgentChat from "./components/AgentChat";
 
 function AppContent() {
   const [, setLocation] = useLocation();
   const [session, setSession] = useState(getSession);
 
-  // ── CARREGAR DADOS DO SISTEMA AO INICIAR ──
+  // CARREGAMENTO CRÍTICO DOS DADOS
   useEffect(() => {
-    fetchAllData().catch(err => console.error("Erro ao carregar dados:", err));
-  }, []);
-
-  // ── INICIALIZAÇÃO DO AGENTE IA ──
-  useEffect(() => {
-    const setupIA = async () => {
-      const token = localStorage.getItem("github_token") || process.env.NEXT_PUBLIC_GITHUB_TOKEN || "proxy";
-
+    const load = async () => {
       try {
-        await initAgent({
-          githubToken: token,
-          model: "openai/gpt-4o-mini",
-          businessContext: "Domínio Pro - Sistema de gestão para barbearias e salões.",
-          llmAsFallback: true,
-          
-          fetchSystemData: async (intent, entities) => {
-            const today = new Date().toISOString().split("T")[0];
-
-            if (intent.includes("agendamento") || intent.includes("agenda")) {
-              const appts = appointmentsStore.list({ date: today });
-              return `Agendamentos de hoje: ${JSON.stringify(appts.map(a => ({ cliente: a.clientName, hora: a.startTime })))}`;
-            }
-
-            if (intent.includes("cliente")) {
-              const q = entities.clientName?.toLowerCase() ?? "";
-              const clients = q 
-                ? clientsStore.list().filter(c => c.name?.toLowerCase().includes(q))
-                : clientsStore.list().slice(0, 10);
-              return `Clientes: ${JSON.stringify(clients.map(c => ({ nome: c.name, tel: c.phone })))}`;
-            }
-
-            return "";
-          },
-
-          executeToolAction: async (toolId, params) => {
-            if (toolId === "agendar") {
-              return "Agendamento solicitado. Verifique a agenda para confirmar.";
-            }
-            return "Ação não suportada.";
-          }
-        });
+        await fetchAllData();
+        console.log("Dados carregados com sucesso");
       } catch (err) {
-        console.error("Erro ao inicializar agente:", err);
+        console.error("Erro crítico ao carregar banco de dados:", err);
       }
     };
-    setupIA();
+    load();
+  }, []);
+
+  // INICIALIZAÇÃO DO AGENTE
+  useEffect(() => {
+    const token = localStorage.getItem("github_token") || process.env.NEXT_PUBLIC_GITHUB_TOKEN || "proxy";
+    initAgent({
+      githubToken: token,
+      model: "openai/gpt-4o-mini",
+      businessContext: "Domínio Pro",
+      llmAsFallback: true,
+      fetchSystemData: async (intent) => {
+        if (intent.includes("cliente")) return JSON.stringify(clientsStore.list().slice(0, 5));
+        return "";
+      }
+    });
   }, []);
 
   return (
@@ -109,11 +71,9 @@ function AppContent() {
               setLocation(getDefaultRoute(p.role));
             }} />
           </Route>
-          
           <Route path="/">
             {!session ? <Redirect to="/login" /> : <Redirect to={getDefaultRoute(session.role)} />}
           </Route>
-
           <DominioLayout>
             <Switch>
               <Route path="/dashboard" component={DashboardPage} />
@@ -139,12 +99,10 @@ function AppContent() {
   );
 }
 
-function App() {
+export default function App() {
   return (
     <ErrorBoundary>
       <AppContent />
     </ErrorBoundary>
   );
 }
-
-export default App;
