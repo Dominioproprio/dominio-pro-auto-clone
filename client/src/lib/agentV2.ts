@@ -265,9 +265,12 @@ REGRAS:
 1. Responda em portugues brasileiro, direto e natural
 2. Voce TEM ACESSO COMPLETO a clientes, servicos, profissionais e agendamentos — os dados sao fornecidos em cada mensagem
 3. Nunca diga que nao tem acesso a dados ou que o usuario precisa fornecer IDs — use os nomes para localizar os IDs nos dados
-4. Para agendar: obtenha cliente, servico, profissional, data e hora — localize os IDs nos dados, nunca peca o ID
-5. Se houver mais de um profissional e o usuario nao informou qual, SEMPRE pergunte antes de agendar
-6. Se houver apenas um profissional, use-o automaticamente sem perguntar
+4. DISTINCAO CRITICA: a lista de "Profissionais" e a lista de "Clientes" sao SEPARADAS — um nome na lista de Profissionais NAO e um cliente, e vice-versa
+5. Para agendar: o CLIENTE e quem recebe o servico (esta na lista de Clientes); o PROFISSIONAL e quem executa (esta na lista de Profissionais)
+6. Quando o usuario mencionar um nome que esta na lista de Profissionais, trate como profissional — NAO busque esse nome na lista de Clientes
+7. Se houver mais de um profissional e o usuario nao informou qual, SEMPRE pergunte antes de agendar
+8. Se houver apenas um profissional, use-o automaticamente sem perguntar
+9. Mantenha o contexto da conversa — se o cliente ja foi identificado em uma mensagem anterior, nao peca novamente
 7. Para cancelar/mover: confirme antes de executar
 8. Peca apenas o dado que falta — nunca peca o ID, voce mesmo descobre
 9. Mantenha o contexto da conversa anterior
@@ -297,24 +300,31 @@ function gatherData(msg: string): string {
   const q = msg.toLowerCase();
   const parts: string[] = [getTodayData(), getEmployeesData()];
 
-  // Sempre incluir servicos — o LLM precisa dos IDs para agendar
+  // Sempre incluir servicos e lista completa de clientes —
+  // o LLM precisa dos dados para identificar cliente E profissional corretamente
   parts.push(getServicesData());
+  parts.push(getAllClientsData());
 
-  // Detectar nome mencionado para busca especifica
+  // Se menciona nome que NAO é de profissional ativo, buscar especificamente no cadastro de clientes
+  const empsLower = new Set(employeesStore.list(true).map((e: any) => e.name.toLowerCase()));
   const words = msg.split(/\s+/).filter(w => w.length > 3 && /^[A-Za-zÀ-ÖØ-öø-ÿ]/.test(w));
-  const stopWords = new Set(["quero","agendar","marcar","cliente","para","preciso","cancelar","mover","agenda","hoje","amanha","hora","servico","horario","consegue","executar","agendamento","voce","fazer","nome","tenho","tenho","qual","quais"]);
-  const name = words.find(w => !stopWords.has(w.toLowerCase()));
+  const stopWords = new Set(["quero","agendar","marcar","cliente","para","preciso","cancelar","mover",
+    "agenda","hoje","amanha","hora","servico","horario","consegue","executar",
+    "agendamento","voce","fazer","nome","tenho","qual","quais","corte","escova",
+    "tintura","manicure","pedicure","barba","hidrata","progressiva"]);
 
-  if (name) {
-    // Busca especifica por nome mencionado
-    parts.push(getClientData(name));
-  }
+  // Filtrar palavras que NAO são nome de profissional e NAO são stopWords
+  const candidateNames = words.filter(w => {
+    const wl = w.toLowerCase();
+    if (stopWords.has(wl)) return false;
+    // Verificar se é parte do nome de algum profissional
+    if ([...empsLower].some(en => en.includes(wl) || wl.includes(en.split(" ")[0]))) return false;
+    return true;
+  });
 
-  // Se ha intencao de agendar mas sem nome especifico, incluir lista de clientes
-  // para o LLM poder perguntar de forma informada ou reconhecer o nome na proxima msg
-  const hasScheduleIntent = /agend|marc|quero|servic|corte|escova|tintut|manicure|pedicure|barba|hidrata|progressiva|atende|horario/i.test(q);
-  if (hasScheduleIntent && !name) {
-    parts.push(getAllClientsData());
+  // Buscar cliente apenas se o nome candidato não for profissional
+  if (candidateNames.length > 0) {
+    parts.push(getClientData(candidateNames[0]));
   }
 
   const dateMatch = q.match(/\b(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo)\b/i);
