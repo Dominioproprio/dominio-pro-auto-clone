@@ -325,7 +325,20 @@ export const appointmentsStore = {
   },
   async create(data: Omit<Appointment, "id" | "createdAt">): Promise<Appointment> {
     const { data: row, error } = await supabase.from("appointments").insert({ client_name: data.clientName, client_id: data.clientId, employee_id: data.employeeId, start_time: data.startTime, end_time: data.endTime, status: data.status, total_price: data.totalPrice, notes: data.notes, payment_status: data.paymentStatus, group_id: data.groupId, services: data.services }).select().single();
-    if (error) throw error;
+    if (error) {
+      // Enriquecer o erro com contexto para diagnóstico
+      const enriched = new Error(
+        `Supabase insert falhou [appointments]: ${error.message}` +
+        (error.code ? ` (code: ${error.code})` : "") +
+        (error.details ? ` | details: ${error.details}` : "") +
+        (error.hint ? ` | hint: ${error.hint}` : "")
+      );
+      (enriched as any).code = error.code;
+      (enriched as any).details = error.details;
+      (enriched as any).hint = error.hint;
+      console.error("[store] appointments.create error:", error, "data:", data);
+      throw enriched;
+    }
     const appt = toAppointment(row);
     cache.appointments.push(appt);
     await addAuditLog("appointment", appt.id, "create", `Agendamento para "${appt.clientName}" criado`);
