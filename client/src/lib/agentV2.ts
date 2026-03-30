@@ -546,3 +546,4 @@ export async function testAgentV2Connection(token: string): Promise<{ ok: boolea
     return { ok: false, message: err instanceof Error ? err.message : "Erro de rede." };
   }
 }
+
