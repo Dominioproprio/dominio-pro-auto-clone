@@ -271,6 +271,32 @@ export const servicesStore = {
 
 export const clientsStore = {
   list(): Client[] { return [...cache.clients]; },
+
+  /** Garante que o cache está carregado antes de usar.
+   *  Se já tiver dados, retorna imediatamente (sem nova requisição).
+   *  Resolve o problema do agente ver lista vazia quando pergunta
+   *  antes do fetchAllData() ter terminado. */
+  async ensureLoaded(): Promise<Client[]> {
+    if (cache.clients.length > 0) return cache.clients;
+    return this.fetchAll();
+  },
+
+  /** Busca clientes diretamente no Supabase por nome ou telefone.
+   *  Usa ilike para suportar acentos e case-insensitive.
+   *  Retorna até 20 resultados sem depender do cache. */
+  async search(query: string): Promise<Client[]> {
+    const q = query.trim();
+    if (!q) return [];
+    const { data, error } = await supabase
+      .from("clients")
+      .select("*")
+      .or(`name.ilike.%${q}%,phone.ilike.%${q}%`)
+      .order("name")
+      .limit(20);
+    if (error) throw error;
+    return (data ?? []).map(toClient);
+  },
+
   async fetchAll(): Promise<Client[]> {
     const data = await fetchAllFromTable("clients", "name");
     cache.clients = data.map(toClient);
