@@ -173,16 +173,38 @@ async function executeAction(action: any): Promise<string> {
       const resolvedTime = normalizeTime(time);
       if (!resolvedTime) return `Horario invalido: "${time}". Use HH:MM.`;
 
-      // Buscar cliente pelo ID fornecido pelo LLM
-      let client = clientsStore.list().find((c: any) => String(c.id) === String(clientId));
-      // Fallback: se ID nao encontrado, buscar pelo nome no contexto da conversa
+      const allClients = clientsStore.list();
+      // 1. Buscar pelo ID exato
+      let client = allClients.find((c: any) => String(c.id) === String(clientId)) ?? null;
+      // 2. Fallback por clientName exato
       if (!client && params.clientName) {
-        const nameLower = params.clientName.toLowerCase();
-        client = clientsStore.list().find((c: any) =>
-          c.name.toLowerCase().includes(nameLower) || nameLower.includes(c.name.toLowerCase().split(" ")[0])
-        ) ?? null;
+        const nameLower = params.clientName.toLowerCase().trim();
+        client = allClients.find((c: any) => c.name.toLowerCase() === nameLower) ?? null;
       }
-      if (!client) return `Cliente ID:${clientId} nao encontrado. Verifique se o cliente esta cadastrado.`;
+      // 3. Fallback por clientName parcial (nome contém ou é contido)
+      if (!client && params.clientName) {
+        const nameLower = params.clientName.toLowerCase().trim();
+        client = allClients.find((c: any) => {
+          const cn = c.name.toLowerCase();
+          return cn.includes(nameLower) || nameLower.includes(cn);
+        }) ?? null;
+      }
+      // 4. Fallback por primeiro nome
+      if (!client && params.clientName) {
+        const firstWord = params.clientName.toLowerCase().split(" ")[0];
+        if (firstWord.length > 2) {
+          const matches = allClients.filter((c: any) => c.name.toLowerCase().includes(firstWord));
+          if (matches.length === 1) client = matches[0]; // só usar se único resultado
+        }
+      }
+      if (!client) {
+        const similar = allClients
+          .filter((c: any) => params.clientName && c.name.toLowerCase().includes(params.clientName.toLowerCase().split(" ")[0]))
+          .slice(0, 3)
+          .map((c: any) => c.name)
+          .join(", ");
+        return `Cliente "${params.clientName ?? clientId}" nao encontrado.${similar ? ` Similares: ${similar}` : " Verifique o cadastro."}`;
+      }
 
       const svc = servicesStore.list(true).find((s: any) => String(s.id) === String(serviceId));
       if (!svc) return `Servico ID:${serviceId} nao encontrado.`;
@@ -211,17 +233,23 @@ async function executeAction(action: any): Promise<string> {
         const rS = new Date(startTime).getTime(), rE = new Date(endTime).getTime();
         return rS < aE && rE > aS;
       });
-      if (conflict) return `Conflito: ${emp.name} ja tem agendamento as ${conflict.startTime.split("T")[1]?.slice(0,5)}.`;
+      if (conflict && !params.forceConflict) {
+        const conflictHour = conflict.startTime.split("T")[1]?.slice(0,5);
+        return `CONFLITO:${emp.name} ja tem agendamento das ${conflictHour} (${conflict.clientName ?? "cliente"}). Para forçar mesmo assim, confirme explicitamente.`;
+      }
 
-      await appointmentsStore.create({
+      const created = await appointmentsStore.create({
         clientName: client.name, clientId: client.id, employeeId: emp.id,
         startTime, endTime, status: "scheduled", totalPrice: svc.price,
         notes: null, paymentStatus: null, groupId: null,
         services: [{ serviceId: svc.id, name: svc.name, price: svc.price, durationMinutes: svc.durationMinutes, employeeId: emp.id }],
       });
+      if (!created || !created.id) {
+        return `Erro ao criar agendamento no banco. Verifique se o cliente "${client.name}" esta cadastrado corretamente e tente novamente.`;
+      }
       window.dispatchEvent(new Event("store_updated"));
       refreshPreferences(); // atualizar preferências aprendidas
-      return `Agendamento criado!\nCliente: ${client.name}\nServico: ${svc.name}\nData: ${resolvedDate} as ${resolvedTime}\nProfissional: ${emp.name}`;
+      return `Agendamento criado! ID:${created.id}\nCliente: ${client.name}\nServico: ${svc.name}\nData: ${resolvedDate} as ${resolvedTime}\nProfissional: ${emp.name}`;
     }
 
     if (type === "cancelar") {
@@ -390,6 +418,22 @@ export async function handleMessageV2(userMessage: string): Promise<AgentV2Respo
   if (!cfg) return { text: "Agente nao configurado." };
   if (!cfg.apiToken || cfg.apiToken === "proxy") return { text: "Configure seu GitHub Token para ativar o Agente IA." };
 
+  // ── Detectar retomada de ação com conflito forçado ─────────
+  const history_check = loadHistory();
+  const lastAssistant = [...history_check].reverse().find(m => m.role === "assistant");
+  if (lastAssistant?.content.startsWith("__PENDING_CONFLICT__") &&
+      /forç|forcar|mesmo assim|pode|sim|confirma|ok/i.test(userMessage.trim())) {
+    try {
+      const pendingAct = JSON.parse(lastAssistant.content.replace("__PENDING_CONFLICT__", ""));
+      addToHistory("user", userMessage);
+      const forceResult = await executeAction(pendingAct);
+      const forceText = forceResult.includes("criado") ? forceResult : `Não foi possível forçar: ${forceResult}`;
+      addToHistory("assistant", forceText);
+      const msgId2 = `m_${Date.now()}`;
+      return { text: forceText, actionExecuted: forceResult.includes("criado"), navigateTo: forceResult.includes("criado") ? "/agenda" : undefined, messageId: msgId2, userMessage };
+    } catch { /* continuar fluxo normal */ }
+  }
+
   // ── Detectar comando de ensino (regra explícita) ──────────
   const teachIntent = detectTeachingIntent(userMessage);
   if (teachIntent) {
@@ -426,10 +470,18 @@ export async function handleMessageV2(userMessage: string): Promise<AgentV2Respo
       if (result.startsWith("AGUARDANDO_PROFISSIONAL:")) {
         const lista = result.replace("AGUARDANDO_PROFISSIONAL:", "");
         text = raw.replace(/```action[\s\S]*?```/g, "").trim();
-        const aviso = `Com qual profissional? Profissionais disponíveis: ${lista}`;
+        const aviso = `Com qual profissional? Disponíveis: ${lista}`;
         text = text ? `${text}\n\n${aviso}` : aviso;
-        // Guardar acao pendente no historico para retomar apos usuario informar profissional
         addToHistory("assistant", `__PENDING_ACTION__${JSON.stringify(act)}`);
+      } else if (result.startsWith("CONFLITO:")) {
+        // Conflito detectado — não executar, avisar e aguardar confirmação explícita
+        const detalhe = result.replace("CONFLITO:", "");
+        text = raw.replace(/```action[\s\S]*?```/g, "").trim();
+        const aviso = `⚠️ Conflito de horário: ${detalhe}\nDeseja agendar mesmo assim? Responda "forçar agendamento" para confirmar.`;
+        text = text ? `${text}\n\n${aviso}` : aviso;
+        // Guardar action com flag forceConflict para reuso se usuário confirmar
+        const pendingAct = { ...act, params: { ...act.params, forceConflict: true } };
+        addToHistory("assistant", `__PENDING_CONFLICT__${JSON.stringify(pendingAct)}`);
       } else {
         text = raw.replace(/```action[\s\S]*?```/g, "").trim();
         text = text ? `${text}\n\n${result}` : result;
