@@ -9,6 +9,13 @@ import {
   employeesStore,
   appointmentsStore,
 } from "./store";
+import {
+  buildMemoryPrompt,
+  detectTeachingIntent,
+  addRule,
+  addFeedback,
+  refreshPreferences,
+} from "./agentMemory";
 
 export interface AgentMessage {
   role: "user" | "assistant";
@@ -26,6 +33,8 @@ export interface AgentV2Response {
   text: string;
   actionExecuted?: boolean;
   navigateTo?: string;
+  messageId?: string;        // para vincular feedback 👍/👎
+  userMessage?: string;      // para vincular feedback
 }
 
 // ─── Historico ────────────────────────────────────────────
@@ -171,11 +180,21 @@ async function executeAction(action: any): Promise<string> {
       if (!svc) return `Servico ID:${serviceId} nao encontrado.`;
 
       const emps = employeesStore.list(true);
-      const emp = emps.find((e: any) => String(e.id) === String(employeeId)) ?? emps[0];
-      if (!emp) return "Nenhum profissional disponivel.";
+      if (emps.length === 0) return "Nenhum profissional disponivel.";
+      // Tentar localizar pelo employeeId fornecido pelo LLM
+      let emp = emps.find((e: any) => String(e.id) === String(employeeId)) ?? null;
+      // Se nao achou e ha apenas um profissional, usar ele automaticamente
+      if (!emp && emps.length === 1) emp = emps[0];
+      // Se nao achou e ha mais de um, bloquear e pedir ao usuario
+      if (!emp) {
+        const lista = emps.map((e: any) => `${e.name} (ID:${e.id})`).join(", ");
+        return `AGUARDANDO_PROFISSIONAL:${lista}`;
+      }
 
       const startTime = `${resolvedDate}T${resolvedTime}:00`;
-      const durationMs = (svc.durationMinutes ?? 60) * 60_000;
+      // Usar durationMinutes do cadastro — ignorar qualquer valor que o LLM tenha calculado
+      const durationMinutes = svc.durationMinutes && svc.durationMinutes > 0 ? svc.durationMinutes : 60;
+      const durationMs = durationMinutes * 60_000;
       const endTime = new Date(new Date(startTime).getTime() + durationMs).toISOString().slice(0, 19);
 
       const conflict = appointmentsStore.list({ date: resolvedDate }).find((a: any) => {
@@ -193,6 +212,7 @@ async function executeAction(action: any): Promise<string> {
         services: [{ serviceId: svc.id, name: svc.name, price: svc.price, durationMinutes: svc.durationMinutes, employeeId: emp.id }],
       });
       window.dispatchEvent(new Event("store_updated"));
+      refreshPreferences(); // atualizar preferências aprendidas
       return `Agendamento criado!\nCliente: ${client.name}\nServico: ${svc.name}\nData: ${resolvedDate} as ${resolvedTime}\nProfissional: ${emp.name}`;
     }
 
@@ -245,10 +265,12 @@ REGRAS:
 1. Responda em portugues brasileiro, direto e natural
 2. Voce TEM ACESSO COMPLETO a clientes, servicos, profissionais e agendamentos — os dados sao fornecidos em cada mensagem
 3. Nunca diga que nao tem acesso a dados ou que o usuario precisa fornecer IDs — use os nomes para localizar os IDs nos dados
-4. Para agendar: quando o usuario informar nome do cliente e servico, localize os IDs nos dados e execute sem pedir ID
-5. Para cancelar/mover: confirme antes de executar
-6. Peca apenas o dado que falta (ex: data, hora) — nunca peca o ID, voce mesmo descobre
-7. Mantenha o contexto da conversa anterior
+4. Para agendar: obtenha cliente, servico, profissional, data e hora — localize os IDs nos dados, nunca peca o ID
+5. Se houver mais de um profissional e o usuario nao informou qual, SEMPRE pergunte antes de agendar
+6. Se houver apenas um profissional, use-o automaticamente sem perguntar
+7. Para cancelar/mover: confirme antes de executar
+8. Peca apenas o dado que falta — nunca peca o ID, voce mesmo descobre
+9. Mantenha o contexto da conversa anterior
 
 ACOES — inclua ao final da resposta quando necessario:
 \`\`\`action
@@ -258,7 +280,7 @@ Tipos: agendar | cancelar | mover | concluir
 - agendar: {clientId, serviceId, employeeId, date, time}
 - cancelar: {appointmentId}
 - mover: {appointmentId, newDate, newTime}
-- concluir: {appointmentId}`;
+- concluir: {appointmentId}${buildMemoryPrompt()}`;
 }
 
 // ─── Dados contextuais ────────────────────────────────────
@@ -350,6 +372,16 @@ export async function handleMessageV2(userMessage: string): Promise<AgentV2Respo
   if (!cfg) return { text: "Agente nao configurado." };
   if (!cfg.apiToken || cfg.apiToken === "proxy") return { text: "Configure seu GitHub Token para ativar o Agente IA." };
 
+  // ── Detectar comando de ensino (regra explícita) ──────────
+  const teachIntent = detectTeachingIntent(userMessage);
+  if (teachIntent) {
+    const rule = addRule(teachIntent);
+    const confirmation = `Entendido! Vou lembrar disso sempre:\n"${rule.raw}"`;
+    addToHistory("user", userMessage);
+    addToHistory("assistant", confirmation);
+    return { text: confirmation };
+  }
+
   addToHistory("user", userMessage);
   const history = loadHistory().slice(0, -1); // sem a msg atual
   const systemData = gatherData(userMessage);
@@ -371,18 +403,32 @@ export async function handleMessageV2(userMessage: string): Promise<AgentV2Respo
     try {
       const act = JSON.parse(match[1]);
       const result = await executeAction(act);
-      text = raw.replace(/```action[\s\S]*?```/g, "").trim();
-      text = text ? `${text}\n\n${result}` : result;
-      actionExecuted = true;
-      if (act.type === "agendar" && result.includes("criado")) navigateTo = "/agenda";
+
+      // Se executeAction pediu profissional, nao executar — pedir ao usuario
+      if (result.startsWith("AGUARDANDO_PROFISSIONAL:")) {
+        const lista = result.replace("AGUARDANDO_PROFISSIONAL:", "");
+        text = raw.replace(/```action[\s\S]*?```/g, "").trim();
+        const aviso = `Com qual profissional? Profissionais disponíveis: ${lista}`;
+        text = text ? `${text}\n\n${aviso}` : aviso;
+        // Guardar acao pendente no historico para retomar apos usuario informar profissional
+        addToHistory("assistant", `__PENDING_ACTION__${JSON.stringify(act)}`);
+      } else {
+        text = raw.replace(/```action[\s\S]*?```/g, "").trim();
+        text = text ? `${text}\n\n${result}` : result;
+        actionExecuted = true;
+        if (act.type === "agendar" && result.includes("criado")) navigateTo = "/agenda";
+      }
     } catch {
       text = raw.replace(/```action[\s\S]*?```/g, "").trim();
     }
   }
 
   addToHistory("assistant", text);
-  return { text, actionExecuted, navigateTo };
+  const msgId = `m_${Date.now()}`;
+  return { text, actionExecuted, navigateTo, messageId: msgId, userMessage };
 }
+
+export { addFeedback };
 
 export async function testAgentV2Connection(token: string): Promise<{ ok: boolean; message: string }> {
   try {
