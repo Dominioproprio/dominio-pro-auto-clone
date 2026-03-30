@@ -173,8 +173,16 @@ async function executeAction(action: any): Promise<string> {
       const resolvedTime = normalizeTime(time);
       if (!resolvedTime) return `Horario invalido: "${time}". Use HH:MM.`;
 
-      const client = clientsStore.list().find((c: any) => String(c.id) === String(clientId));
-      if (!client) return `Cliente ID:${clientId} nao encontrado.`;
+      // Buscar cliente pelo ID fornecido pelo LLM
+      let client = clientsStore.list().find((c: any) => String(c.id) === String(clientId));
+      // Fallback: se ID nao encontrado, buscar pelo nome no contexto da conversa
+      if (!client && params.clientName) {
+        const nameLower = params.clientName.toLowerCase();
+        client = clientsStore.list().find((c: any) =>
+          c.name.toLowerCase().includes(nameLower) || nameLower.includes(c.name.toLowerCase().split(" ")[0])
+        ) ?? null;
+      }
+      if (!client) return `Cliente ID:${clientId} nao encontrado. Verifique se o cliente esta cadastrado.`;
 
       const svc = servicesStore.list(true).find((s: any) => String(s.id) === String(serviceId));
       if (!svc) return `Servico ID:${serviceId} nao encontrado.`;
@@ -280,7 +288,7 @@ ACOES — inclua ao final da resposta quando necessario:
 {"type":"agendar","params":{"clientId":123,"serviceId":45,"employeeId":2,"date":"2025-03-28","time":"14:00"}}
 \`\`\`
 Tipos: agendar | cancelar | mover | concluir
-- agendar: {clientId, serviceId, employeeId, date, time}
+- agendar: {clientId, clientName, serviceId, employeeId, date, time}  ← incluir clientName sempre
 - cancelar: {appointmentId}
 - mover: {appointmentId, newDate, newTime}
 - concluir: {appointmentId}${buildMemoryPrompt()}`;
