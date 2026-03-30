@@ -130,8 +130,8 @@ export function getPreferencesPrompt(): string {
   const prefs = loadClientPreferences().filter(p => p.visitCount >= 2);
   if (prefs.length === 0) return "";
 
-  // Limitar aos 20 clientes mais frequentes
-  const top = prefs.sort((a, b) => b.visitCount - a.visitCount).slice(0, 20);
+  // Top 30 clientes mais frequentes (sem limite por nome — busca no cache completo)
+  const top = prefs.sort((a, b) => b.visitCount - a.visitCount).slice(0, 30);
 
   const lines = top.map(p => {
     const parts: string[] = [`${p.clientName} (${p.visitCount}x)`];
