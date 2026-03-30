@@ -8,7 +8,8 @@ import {
   MessageCircle, X, Send, Brain, Mic, ChevronDown,
   ThumbsUp, ThumbsDown, Trash2, Zap,
 } from "lucide-react";
-import { handleMessageV2, clearHistory } from "@/lib/agentV2";
+import { handleMessageV2, clearHistory, addFeedback } from "@/lib/agentV2";
+import { loadRules, removeRule } from "@/lib/agentMemory";
 
 // ─── Tipos ─────────────────────────────────────────────────
 
@@ -17,6 +18,8 @@ interface ChatMessage {
   role: "user" | "agent";
   content: string;
   timestamp: number;
+  userMessage?: string;   // para feedback
+  feedback?: "good" | "bad";
 }
 
 // ─── Helpers ───────────────────────────────────────────────
@@ -70,6 +73,8 @@ export default function AgentChat() {
   const [isTyping, setIsTyping] = useState(false);
   const [hasNew, setHasNew] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [showRules, setShowRules] = useState(false);
+  const [rules, setRules] = useState(() => loadRules());
   const [, setLocation] = useLocation();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -103,8 +108,14 @@ export default function AgentChat() {
   }, [messages, isOpen]);
 
   // ── Enviar mensagem ──────────────────────────────────────
+  const lastSentRef = useRef<number>(0);
+
   const sendMessage = useCallback(async (text: string) => {
+    const now = Date.now();
     if (!text.trim() || isTyping) return;
+    // Debounce: ignorar se mesma mensagem enviada nos últimos 2 segundos
+    if (now - lastSentRef.current < 2000) return;
+    lastSentRef.current = now;
 
     const userMsg: ChatMessage = {
       id: `u_${Date.now()}`,
@@ -125,10 +136,11 @@ export default function AgentChat() {
       const response = await handleMessageV2(text.trim());
 
       const agentMsg: ChatMessage = {
-        id: `a_${Date.now()}`,
+        id: response.messageId ?? `a_${Date.now()}`,
         role: "agent",
         content: response.text,
         timestamp: Date.now(),
+        userMessage: text.trim(),
       };
 
       setMessages(prev => {
@@ -158,6 +170,21 @@ export default function AgentChat() {
   const handleSend = useCallback(() => {
     sendMessage(input);
   }, [input, sendMessage]);
+
+  // ── Feedback 👍/👎 ───────────────────────────────────────
+  const handleFeedback = useCallback((msg: ChatMessage, rating: "good" | "bad") => {
+    if (!msg.userMessage) return;
+    addFeedback(msg.userMessage, msg.content, rating);
+    setMessages(prev =>
+      prev.map(m => m.id === msg.id ? { ...m, feedback: rating } : m)
+    );
+  }, []);
+
+  // ── Remover regra ────────────────────────────────────────
+  const handleRemoveRule = useCallback((id: string) => {
+    removeRule(id);
+    setRules(loadRules());
+  }, []);
 
   // ── Limpar conversa ──────────────────────────────────────
   const handleClear = useCallback(() => {
@@ -239,6 +266,13 @@ export default function AgentChat() {
               </div>
             </div>
             <button
+              onClick={() => setShowRules(r => !r)}
+              className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"
+              title="Regras aprendidas"
+            >
+              <Zap className="w-3.5 h-3.5" style={{ color: showRules ? accent : "rgba(255,255,255,0.3)" }} />
+            </button>
+            <button
               onClick={handleClear}
               className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"
               title="Limpar conversa"
@@ -250,12 +284,30 @@ export default function AgentChat() {
             </button>
           </div>
 
+          {/* Rules Panel */}
+          {showRules && (
+            <div className="mx-4 mt-3 mb-1 rounded-xl p-3 text-xs" style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)" }}>
+              <p className="text-white/60 font-semibold mb-2 flex items-center gap-1">
+                <Zap className="w-3 h-3" style={{ color: accent }} /> Regras aprendidas
+              </p>
+              {rules.length === 0
+                ? <p className="text-white/30">Nenhuma regra ainda. Diga ao agente: "Lembra que..."</p>
+                : rules.map(r => (
+                    <div key={r.id} className="flex items-start justify-between gap-2 mb-1">
+                      <p className="text-white/70 flex-1">• {r.raw}</p>
+                      <button onClick={() => handleRemoveRule(r.id)} className="text-white/20 hover:text-red-400 shrink-0">✕</button>
+                    </div>
+                  ))
+              }
+            </div>
+          )}
+
           {/* Messages */}
           <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
             {messages.map(msg => (
               <div
                 key={msg.id}
-                className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"}`}
               >
                 <div
                   className="max-w-[88%] rounded-2xl px-3.5 py-2.5 text-sm"
@@ -273,6 +325,27 @@ export default function AgentChat() {
                     <p key={i} className={i > 0 ? "mt-1" : ""}>{line}</p>
                   ))}
                 </div>
+                {/* Feedback buttons — apenas em mensagens do agente */}
+                {msg.role === "agent" && msg.userMessage && (
+                  <div className="flex gap-1 mt-1 ml-1">
+                    <button
+                      onClick={() => handleFeedback(msg, "good")}
+                      className="p-1 rounded-md transition-colors"
+                      style={{ background: msg.feedback === "good" ? "rgba(52,211,153,0.2)" : "transparent" }}
+                      title="Boa resposta"
+                    >
+                      <ThumbsUp className="w-3 h-3" style={{ color: msg.feedback === "good" ? "#34d399" : "rgba(255,255,255,0.2)" }} />
+                    </button>
+                    <button
+                      onClick={() => handleFeedback(msg, "bad")}
+                      className="p-1 rounded-md transition-colors"
+                      style={{ background: msg.feedback === "bad" ? "rgba(239,68,68,0.2)" : "transparent" }}
+                      title="Resposta ruim"
+                    >
+                      <ThumbsDown className="w-3 h-3" style={{ color: msg.feedback === "bad" ? "#ef4444" : "rgba(255,255,255,0.2)" }} />
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
 
