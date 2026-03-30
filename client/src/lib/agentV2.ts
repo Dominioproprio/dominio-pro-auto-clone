@@ -78,24 +78,37 @@ function getTodayData(): string {
   return `Agendamentos hoje (${today}):\n${lines.join("\n")}`;
 }
 
-function getClientData(query: string): string {
-  const q = query.toLowerCase().trim();
-  const all = clientsStore.list();
+async function getClientData(query: string): Promise<string> {
+  const q = query.trim();
+
+  // 1. Garante cache carregado — busca no Supabase se vazio
+  const all = await clientsStore.ensureLoaded();
   if (!q) return `Total clientes: ${all.length}`;
-  const found = all.filter((c: any) =>
-    c.name?.toLowerCase().includes(q) || c.phone?.includes(q)
+
+  // 2. Busca no cache primeiro (rápido)
+  const ql = q.toLowerCase();
+  const fromCache = all.filter((c: any) =>
+    c.name?.toLowerCase().includes(ql) || c.phone?.includes(q)
   ).slice(0, 10);
-  if (found.length === 0) {
-    const parts = q.split(" ").filter((p: string) => p.length > 2);
-    const fuzzy = all.filter((c: any) =>
-      parts.some((p: string) => c.name?.toLowerCase().includes(p))
-    ).slice(0, 5);
-    if (fuzzy.length > 0) {
-      return `Nao encontrado exato. Similares:\n${fuzzy.map((c: any) => `  - ID:${c.id} ${c.name} | ${c.phone ?? "-"}`).join("\n")}`;
-    }
-    return `Nenhum cliente com "${query}".`;
+
+  if (fromCache.length > 0) {
+    return `Clientes:\n${fromCache.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
   }
-  return `Clientes:\n${found.map((c: any) => `  - ID:${c.id} ${c.name} | ${c.phone ?? "-"}`).join("\n")}`;
+
+  // 3. Cache vazio ou sem resultado — busca direto no Supabase (suporta acentos via ilike)
+  try {
+    const fromDB = await clientsStore.search(q);
+    if (fromDB.length > 0) {
+      fromDB.forEach((c: any) => {
+        if (!all.find((x: any) => x.id === c.id)) all.push(c);
+      });
+      return `Clientes:\n${fromDB.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
+    }
+  } catch (err) {
+    console.warn("[agentV2] Busca direta Supabase falhou, usando cache:", err);
+  }
+
+  return `Nenhum cliente encontrado com "${query}". Total no sistema: ${all.length}.`;
 }
 
 function getServicesData(): string {
@@ -355,52 +368,53 @@ Tipos: agendar | cancelar | mover | concluir
 
 // ─── Dados contextuais ────────────────────────────────────
 
-function getAllClientsData(): string {
-  const all = clientsStore.list();
+async function getAllClientsData(): Promise<string> {
+  const all = await clientsStore.ensureLoaded();
   if (all.length === 0) return "Nenhum cliente cadastrado.";
   return `Total de clientes cadastrados: ${all.length}. Use busca por nome para localizar um cliente especifico.`;
 }
 
-/** Busca clientes por nome com fuzzy match — retorna até 10 resultados */
-function searchClientsData(query: string): string {
-  const all = clientsStore.list();
-  if (all.length === 0) return "Nenhum cliente cadastrado.";
-  const q = query.toLowerCase().trim();
-  const parts = q.split(" ").filter((p: string) => p.length > 1);
+/** Busca clientes por nome — cache primeiro, Supabase como fallback */
+async function searchClientsData(query: string): Promise<string> {
+  const q = query.trim();
+  if (!q) return "Busca vazia.";
+  const ql = q.toLowerCase();
 
-  // Match exato primeiro
-  let found = all.filter((c: any) => c.name.toLowerCase() === q);
+  // Cache primeiro
+  const all = await clientsStore.ensureLoaded();
+  const parts = ql.split(" ").filter((p: string) => p.length > 1);
 
-  // Match parcial se nao achou exato
+  let found = all.filter((c: any) => c.name.toLowerCase() === ql);
   if (found.length === 0) {
     found = all.filter((c: any) => {
       const cn = c.name.toLowerCase();
-      return cn.includes(q) || q.includes(cn);
+      return cn.includes(ql) || parts.some((p: string) => cn.includes(p));
     });
   }
 
-  // Match por partes do nome
-  if (found.length === 0 && parts.length > 0) {
-    found = all.filter((c: any) => {
-      const cn = c.name.toLowerCase();
-      return parts.some((p: string) => cn.includes(p));
-    });
+  if (found.length > 0) {
+    const results = found.slice(0, 10);
+    return `Clientes encontrados para "${query}" (${found.length} resultado(s)):\n${results.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
   }
 
-  if (found.length === 0) {
-    return `Nenhum cliente encontrado com "${query}". Total cadastrado: ${all.length}.`;
+  // Fallback: busca direto no Supabase com ilike (suporta acentos)
+  try {
+    const fromDB = await clientsStore.search(q);
+    if (fromDB.length > 0) {
+      return `Clientes encontrados para "${query}" (${fromDB.length} resultado(s)):\n${fromDB.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
+    }
+  } catch (err) {
+    console.warn("[agentV2] Fallback Supabase falhou:", err);
   }
 
-  const results = found.slice(0, 10);
-  return `Clientes encontrados para "${query}" (${found.length} resultado(s)):\n${results.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
+  return `Nenhum cliente encontrado com "${query}". Total no sistema: ${all.length}.`;
 }
 
-function gatherData(msg: string): string {
+async function gatherData(msg: string): Promise<string> {
   const q = msg.toLowerCase();
   const parts: string[] = [getTodayData(), getEmployeesData(), getServicesData()];
 
   // Extrair candidatos a nome de cliente da mensagem
-  // (ignorar profissionais, stopwords e palavras de servico)
   const empsLower = new Set(employeesStore.list(true).flatMap((e: any) =>
     e.name.toLowerCase().split(" ")
   ));
@@ -419,12 +433,10 @@ function gatherData(msg: string): string {
   });
 
   if (candidateNames.length > 0) {
-    // Buscar com o conjunto de palavras candidatas (ex: "bruna" ou "fernanda bruna")
     const searchTerm = candidateNames.join(" ");
-    parts.push(searchClientsData(searchTerm));
+    parts.push(await searchClientsData(searchTerm));
   } else {
-    // Sem nome detectado — apenas informar total
-    parts.push(getAllClientsData());
+    parts.push(await getAllClientsData());
   }
 
   const dateMatch = q.match(/\b(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo)\b/i);
@@ -510,7 +522,7 @@ export async function handleMessageV2(userMessage: string): Promise<AgentV2Respo
 
   addToHistory("user", userMessage);
   const history = loadHistory().slice(0, -1); // sem a msg atual
-  const systemData = gatherData(userMessage);
+  const systemData = await gatherData(userMessage);
 
   let raw: string;
   try {
@@ -577,3 +589,4 @@ export async function testAgentV2Connection(token: string): Promise<{ ok: boolea
     return { ok: false, message: err instanceof Error ? err.message : "Erro de rede." };
   }
 }
+
