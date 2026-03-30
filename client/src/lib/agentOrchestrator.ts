@@ -299,6 +299,37 @@ export async function handleUserMessage(userMessage: string): Promise<AgentRespo
         entities = llmResult.entities;
         confidence = llmResult.confidence;
         source = "llm";
+
+        // Após LLM sobrescrever entities, resolver cliente/serviço contra o cadastro
+        // (o LLM não tem acesso ao banco, então clientId/serviceId nunca vêm preenchidos)
+        if (intent === "agendar") {
+          if (entities.clientName && !entities.clientId) {
+            const resolvedClient = resolveClientFromStore(entities.clientName);
+            if (resolvedClient) {
+              entities.clientName = resolvedClient.name;
+              entities.clientId = String(resolvedClient.id);
+            }
+          }
+          if (entities.serviceName && !entities.serviceId) {
+            const resolvedService = resolveServiceFromStore(entities.serviceName);
+            if (resolvedService) {
+              entities.serviceName = resolvedService.name;
+              entities.serviceId = String(resolvedService.id);
+            } else {
+              delete entities.serviceName;
+            }
+          }
+          if (entities.clientId && !entities.serviceName) {
+            const lastSvc = getLastServiceForClient(parseInt(entities.clientId));
+            if (lastSvc) {
+              const svcActive = servicesStore.list(true).find(s => s.id === lastSvc.serviceId);
+              if (svcActive) {
+                entities.serviceName = svcActive.name;
+                entities.serviceId = String(svcActive.id);
+              }
+            }
+          }
+        }
       }
     } catch (err) {
       console.warn("[agentOrchestrator] LLM classification failed, using local:", err);
