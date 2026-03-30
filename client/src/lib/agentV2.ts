@@ -242,7 +242,14 @@ async function executeAction(action: any): Promise<string> {
         clientName: client.name, clientId: client.id, employeeId: emp.id,
         startTime, endTime, status: "scheduled", totalPrice: svc.price,
         notes: null, paymentStatus: null, groupId: null,
-        services: [{ serviceId: svc.id, name: svc.name, price: svc.price, durationMinutes: svc.durationMinutes, employeeId: emp.id }],
+        services: [{
+          serviceId: svc.id,
+          name: svc.name,
+          price: svc.price,
+          durationMinutes: svc.durationMinutes,
+          color: svc.color ?? "#ec4899",
+          materialCostPercent: svc.materialCostPercent ?? 0,
+        }],
       });
       if (!created || !created.id) {
         return `Erro ao criar agendamento no banco. Verifique se o cliente "${client.name}" esta cadastrado corretamente e tente novamente.`;
@@ -280,7 +287,31 @@ async function executeAction(action: any): Promise<string> {
 
     return `Acao desconhecida: "${type}".`;
   } catch (err) {
-    return `Erro: ${err instanceof Error ? err.message : String(err)}`;
+    // Logar no console para diagnóstico via F12
+    console.error("[AgentV2] Erro em executeAction:", { type, params: action.params, err });
+
+    // Relatório de erro detalhado para diagnóstico
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const errDetails: string[] = [
+      `❌ Erro ao executar ação "${type}"`,
+      `Mensagem: ${errMsg}`,
+    ];
+
+    // Detalhes extras para erros do Supabase
+    if (err && typeof err === "object") {
+      const e = err as any;
+      if (e.code) errDetails.push(`Código: ${e.code}`);
+      if (e.details) errDetails.push(`Detalhes: ${e.details}`);
+      if (e.hint) errDetails.push(`Dica: ${e.hint}`);
+      if (e.message && e.message !== errMsg) errDetails.push(`Info: ${e.message}`);
+    }
+
+    // Contexto da ação que falhou
+    try {
+      errDetails.push(`Parâmetros: ${JSON.stringify(action.params ?? {}, null, 2)}`);
+    } catch {}
+
+    return errDetails.join("\n");
   }
 }
 
@@ -546,4 +577,3 @@ export async function testAgentV2Connection(token: string): Promise<{ ok: boolea
     return { ok: false, message: err instanceof Error ? err.message : "Erro de rede." };
   }
 }
-
