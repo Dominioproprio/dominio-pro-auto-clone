@@ -243,11 +243,12 @@ Dados reais do sistema sao fornecidos em cada mensagem — use-os com precisao.
 
 REGRAS:
 1. Responda em portugues brasileiro, direto e natural
-2. Use apenas IDs dos dados fornecidos — nunca invente
-3. Para agendar: execute se tiver clientId, serviceId, employeeId, date, time
-4. Para cancelar/mover: confirme antes de executar
-5. Peca apenas o dado que falta, de forma objetiva
-6. Mantenha o contexto da conversa anterior
+2. Voce TEM ACESSO COMPLETO a clientes, servicos, profissionais e agendamentos — os dados sao fornecidos em cada mensagem
+3. Nunca diga que nao tem acesso a dados ou que o usuario precisa fornecer IDs — use os nomes para localizar os IDs nos dados
+4. Para agendar: quando o usuario informar nome do cliente e servico, localize os IDs nos dados e execute sem pedir ID
+5. Para cancelar/mover: confirme antes de executar
+6. Peca apenas o dado que falta (ex: data, hora) — nunca peca o ID, voce mesmo descobre
+7. Mantenha o contexto da conversa anterior
 
 ACOES — inclua ao final da resposta quando necessario:
 \`\`\`action
@@ -262,19 +263,37 @@ Tipos: agendar | cancelar | mover | concluir
 
 // ─── Dados contextuais ────────────────────────────────────
 
+function getAllClientsData(): string {
+  const all = clientsStore.list();
+  if (all.length === 0) return "Nenhum cliente cadastrado.";
+  // Limitar a 100 para nao estourar contexto
+  const slice = all.slice(0, 100);
+  return `Clientes cadastrados (${all.length} total, mostrando ${slice.length}):\n${slice.map((c: any) => `  - ID:${c.id} ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
+}
+
 function gatherData(msg: string): string {
   const q = msg.toLowerCase();
   const parts: string[] = [getTodayData(), getEmployeesData()];
 
-  if (/servi|corte|escova|tintura|manicure|pedicure|barba|hidrata|progressiva|prec|valor|quanto/i.test(q)) {
-    parts.push(getServicesData());
+  // Sempre incluir servicos — o LLM precisa dos IDs para agendar
+  parts.push(getServicesData());
+
+  // Detectar nome mencionado para busca especifica
+  const words = msg.split(/\s+/).filter(w => w.length > 3 && /^[A-Za-zÀ-ÖØ-öø-ÿ]/.test(w));
+  const stopWords = new Set(["quero","agendar","marcar","cliente","para","preciso","cancelar","mover","agenda","hoje","amanha","hora","servico","horario","consegue","executar","agendamento","voce","fazer","nome","tenho","tenho","qual","quais"]);
+  const name = words.find(w => !stopWords.has(w.toLowerCase()));
+
+  if (name) {
+    // Busca especifica por nome mencionado
+    parts.push(getClientData(name));
   }
 
-  // Detectar nome mencionado
-  const words = msg.split(/\s+/).filter(w => w.length > 3 && /^[A-Za-zÀ-ÖØ-öø-ÿ]/.test(w));
-  const stopWords = new Set(["quero","agendar","marcar","cliente","para","preciso","cancelar","mover","agenda","hoje","amanha","hora","servico","horario"]);
-  const name = words.find(w => !stopWords.has(w.toLowerCase()));
-  if (name) parts.push(getClientData(name));
+  // Se ha intencao de agendar mas sem nome especifico, incluir lista de clientes
+  // para o LLM poder perguntar de forma informada ou reconhecer o nome na proxima msg
+  const hasScheduleIntent = /agend|marc|quero|servic|corte|escova|tintut|manicure|pedicure|barba|hidrata|progressiva|atende|horario/i.test(q);
+  if (hasScheduleIntent && !name) {
+    parts.push(getAllClientsData());
+  }
 
   const dateMatch = q.match(/\b(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo)\b/i);
   if (dateMatch) parts.push(getApptsByDate(dateMatch[1]));
