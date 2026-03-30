@@ -327,40 +327,73 @@ Tipos: agendar | cancelar | mover | concluir
 function getAllClientsData(): string {
   const all = clientsStore.list();
   if (all.length === 0) return "Nenhum cliente cadastrado.";
-  // Limitar a 100 para nao estourar contexto
-  const slice = all.slice(0, 100);
-  return `Clientes cadastrados (${all.length} total, mostrando ${slice.length}):\n${slice.map((c: any) => `  - ID:${c.id} ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
+  return `Total de clientes cadastrados: ${all.length}. Use busca por nome para localizar um cliente especifico.`;
+}
+
+/** Busca clientes por nome com fuzzy match — retorna até 10 resultados */
+function searchClientsData(query: string): string {
+  const all = clientsStore.list();
+  if (all.length === 0) return "Nenhum cliente cadastrado.";
+  const q = query.toLowerCase().trim();
+  const parts = q.split(" ").filter((p: string) => p.length > 1);
+
+  // Match exato primeiro
+  let found = all.filter((c: any) => c.name.toLowerCase() === q);
+
+  // Match parcial se nao achou exato
+  if (found.length === 0) {
+    found = all.filter((c: any) => {
+      const cn = c.name.toLowerCase();
+      return cn.includes(q) || q.includes(cn);
+    });
+  }
+
+  // Match por partes do nome
+  if (found.length === 0 && parts.length > 0) {
+    found = all.filter((c: any) => {
+      const cn = c.name.toLowerCase();
+      return parts.some((p: string) => cn.includes(p));
+    });
+  }
+
+  if (found.length === 0) {
+    return `Nenhum cliente encontrado com "${query}". Total cadastrado: ${all.length}.`;
+  }
+
+  const results = found.slice(0, 10);
+  return `Clientes encontrados para "${query}" (${found.length} resultado(s)):\n${results.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
 }
 
 function gatherData(msg: string): string {
   const q = msg.toLowerCase();
-  const parts: string[] = [getTodayData(), getEmployeesData()];
+  const parts: string[] = [getTodayData(), getEmployeesData(), getServicesData()];
 
-  // Sempre incluir servicos e lista completa de clientes —
-  // o LLM precisa dos dados para identificar cliente E profissional corretamente
-  parts.push(getServicesData());
-  parts.push(getAllClientsData());
-
-  // Se menciona nome que NAO é de profissional ativo, buscar especificamente no cadastro de clientes
-  const empsLower = new Set(employeesStore.list(true).map((e: any) => e.name.toLowerCase()));
-  const words = msg.split(/\s+/).filter(w => w.length > 3 && /^[A-Za-zÀ-ÖØ-öø-ÿ]/.test(w));
-  const stopWords = new Set(["quero","agendar","marcar","cliente","para","preciso","cancelar","mover",
+  // Extrair candidatos a nome de cliente da mensagem
+  // (ignorar profissionais, stopwords e palavras de servico)
+  const empsLower = new Set(employeesStore.list(true).flatMap((e: any) =>
+    e.name.toLowerCase().split(" ")
+  ));
+  const stopWords = new Set([
+    "quero","agendar","marcar","cliente","para","preciso","cancelar","mover",
     "agenda","hoje","amanha","hora","servico","horario","consegue","executar",
     "agendamento","voce","fazer","nome","tenho","qual","quais","corte","escova",
-    "tintura","manicure","pedicure","barba","hidrata","progressiva"]);
+    "tintura","manicure","pedicure","barba","hidrata","progressiva","termica",
+    "relaxamento","botox","coloracao","luzes","alisamento","massagem","unhas"
+  ]);
 
-  // Filtrar palavras que NAO são nome de profissional e NAO são stopWords
+  const words = msg.split(/\s+/).filter(w => w.length > 2 && /^[A-Za-zÀ-ÖØ-öø-ÿ]/.test(w));
   const candidateNames = words.filter(w => {
     const wl = w.toLowerCase();
-    if (stopWords.has(wl)) return false;
-    // Verificar se é parte do nome de algum profissional
-    if ([...empsLower].some(en => en.includes(wl) || wl.includes(en.split(" ")[0]))) return false;
-    return true;
+    return !stopWords.has(wl) && !empsLower.has(wl);
   });
 
-  // Buscar cliente apenas se o nome candidato não for profissional
   if (candidateNames.length > 0) {
-    parts.push(getClientData(candidateNames[0]));
+    // Buscar com o conjunto de palavras candidatas (ex: "bruna" ou "fernanda bruna")
+    const searchTerm = candidateNames.join(" ");
+    parts.push(searchClientsData(searchTerm));
+  } else {
+    // Sem nome detectado — apenas informar total
+    parts.push(getAllClientsData());
   }
 
   const dateMatch = q.match(/\b(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo)\b/i);
