@@ -42,7 +42,11 @@ function AppContent() {
 
   // ── CARREGAR DADOS DO SISTEMA AO INICIAR ──
   useEffect(() => {
-    fetchAllData().catch(err => console.error("Erro ao carregar dados:", err));
+    // Tenta carregar todos os dados. Se falhar (ex: rede instável), o agente
+    // vai buscar diretamente no Supabase via ensureLoaded() quando precisar.
+    fetchAllData().catch(err => {
+      console.warn("[App] fetchAllData falhou — agente usará busca direta:", err);
+    });
   }, []);
 
   // ── INICIALIZAÇÃO DO AGENTE IA v2 ──
