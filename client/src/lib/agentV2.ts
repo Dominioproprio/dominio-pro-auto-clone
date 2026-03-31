@@ -295,18 +295,49 @@ async function getClientWithHistory(query: string): Promise<string> {
 
   const ql = q.toLowerCase();
   const all = await clientsStore.ensureLoaded();
+  const parts = ql.split(" ").filter((p: string) => p.length > 1);
 
-  // Busca no cache
-  let found = all.filter((c: any) =>
-    c.name?.toLowerCase().includes(ql) || c.phone?.includes(q)
-  );
+  // 1. Busca exata no cache
+  let found = all.filter((c: any) => c.name?.toLowerCase() === ql);
 
-  // Fallback: busca no Supabase (suporta acentos via ilike)
+  // 2. Busca parcial: nome contem a query inteira OU qualquer parte da query
+  if (found.length === 0) {
+    found = all.filter((c: any) => {
+      const cn = c.name?.toLowerCase() ?? "";
+      return cn.includes(ql) || parts.some((p: string) => cn.includes(p));
+    });
+  }
+
+  // 3. Busca por telefone
+  if (found.length === 0) {
+    found = all.filter((c: any) => c.phone?.includes(q));
+  }
+
+  // 4. Fallback: busca no Supabase (suporta acentos via ilike)
   if (found.length === 0) {
     try {
-      found = await clientsStore.search(q);
+      const fromDB = await clientsStore.search(q);
+      if (fromDB.length > 0) {
+        // Adicionar ao cache local
+        fromDB.forEach((c: any) => {
+          if (!all.find((x: any) => x.id === c.id)) all.push(c);
+        });
+        found = fromDB;
+      }
     } catch (err) {
       console.warn("[agentV2] Busca Supabase falhou:", err);
+    }
+    // Tentar buscar cada parte separadamente no Supabase
+    if (found.length === 0 && parts.length > 1) {
+      for (const part of parts) {
+        try {
+          const partResults = await clientsStore.search(part);
+          if (partResults.length > 0) {
+            found = partResults;
+            break;
+          }
+        } catch { /* continuar */ }
+      }
     }
   }
 
@@ -314,7 +345,8 @@ async function getClientWithHistory(query: string): Promise<string> {
     return `Nenhum cliente encontrado com "${query}". Total no sistema: ${all.length}.`;
   }
 
-  const results = found.slice(0, 15);
+  const results = found.slice(0, 20);
+  const hasMore = found.length > 20;
   const lines: string[] = [];
 
   for (const c of results) {
@@ -337,9 +369,9 @@ async function getClientWithHistory(query: string): Promise<string> {
     lines.push(line);
   }
 
-  let text = `Clientes encontrados (${found.length}):\n${lines.join("\n")}`;
-  if (found.length > 15) {
-    text += `\n(Exibindo 15 de ${found.length}. Seja mais especifico para refinar.)`;
+  let text = `Clientes encontrados para "${query}" (${found.length} resultado(s)):\n${lines.join("\n")}`;
+  if (hasMore) {
+    text += `\n(Exibindo 20 de ${found.length} resultados. Ha mais clientes alem destes.)`;
   }
   return text;
 }
@@ -738,12 +770,16 @@ async function gatherData(msg: string): Promise<string> {
     "concluir", "fechar", "abrir", "buscar", "procurar",
   ]);
 
+  // Funcao para remover acentos (normalizar para comparacao com stop words)
+  const removeAccents = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
   const words = msg
     .split(/\s+/)
     .filter((w) => w.length > 2 && /^[A-Za-zÀ-ÖØ-öø-ÿ]/.test(w));
   const candidateNames = words.filter((w) => {
     const wl = w.toLowerCase();
-    return !stopWords.has(wl) && !empsLower.has(wl) && !svcsLower.has(wl);
+    const wlNorm = removeAccents(wl); // "amanhã" -> "amanha", "às" -> "as"
+    return !stopWords.has(wl) && !stopWords.has(wlNorm) && !empsLower.has(wl) && !empsLower.has(wlNorm) && !svcsLower.has(wl) && !svcsLower.has(wlNorm);
   });
 
   if (candidateNames.length > 0) {
