@@ -277,13 +277,13 @@ async function executeAction(action: any): Promise<string> {
       }
       window.dispatchEvent(new Event("store_updated"));
       refreshPreferences(); // atualizar preferências aprendidas
-      return `Agendamento criado! ID:${created.id}\nCliente: ${client.name}\nServico: ${svc.name}\nData: ${resolvedDate} as ${resolvedTime}\nProfissional: ${emp.name}`;
+      return `✅ Agendamento criado com sucesso!\nID: ${created.id}\nCliente: ${client.name}\nServico: ${svc.name}\nData: ${resolvedDate} às ${resolvedTime}\nProfissional: ${emp.name}`;
     }
 
     if (type === "cancelar") {
       await appointmentsStore.update(params.appointmentId, { status: "cancelled" });
       window.dispatchEvent(new Event("store_updated"));
-      return `Agendamento ID:${params.appointmentId} cancelado.`;
+      return `✅ Agendamento ID:${params.appointmentId} cancelado com sucesso.`;
     }
 
     if (type === "mover") {
@@ -297,13 +297,13 @@ async function executeAction(action: any): Promise<string> {
       const newEnd = new Date(new Date(newStart).getTime() + durMs).toISOString().slice(0, 19);
       await appointmentsStore.update(appt.id, { startTime: newStart, endTime: newEnd });
       window.dispatchEvent(new Event("store_updated"));
-      return `Agendamento movido para ${resolvedDate} as ${resolvedTime}.`;
+      return `✅ Agendamento movido com sucesso para ${resolvedDate} às ${resolvedTime}.`;
     }
 
     if (type === "concluir") {
       await appointmentsStore.update(params.appointmentId, { status: "completed" });
       window.dispatchEvent(new Event("store_updated"));
-      return `Agendamento ID:${params.appointmentId} concluido.`;
+      return `✅ Agendamento ID:${params.appointmentId} concluído com sucesso.`;
     }
 
     return `Acao desconhecida: "${type}".`;
@@ -349,7 +349,7 @@ ${config.businessContext ?? ""}
 Voce gerencia agendamentos, clientes, servicos e profissionais.
 Dados reais do sistema sao fornecidos em cada mensagem — use-os com precisao.
 
-REGRAS:
+REGRAS CRITICAS:
 1. Responda em portugues brasileiro, direto e natural
 2. Voce TEM ACESSO COMPLETO a clientes, servicos, profissionais e agendamentos — os dados sao fornecidos em cada mensagem
 3. Nunca diga que nao tem acesso a dados ou que o usuario precisa fornecer IDs — use os nomes para localizar os IDs nos dados
@@ -360,11 +360,14 @@ REGRAS:
 8. Se houver apenas um profissional, use-o automaticamente sem perguntar
 9. Mantenha o contexto da conversa — se o cliente ja foi identificado em uma mensagem anterior, nao peca novamente
 10. SEMPRE que a lista de resultados (clientes, agendamentos, etc.) indicar que há mais itens além dos exibidos, informe ao usuário que existem mais resultados e que ele pode ser mais específico na busca se não encontrar o que deseja.
-11. Para cancelar/mover: confirme antes de executar
-12. Peca apenas o dado que falta — nunca peca o ID, voce mesmo descobre
-13. Mantenha o contexto da conversa anterior
 
-ACOES — inclua ao final da resposta quando necessario:
+INSTRUCOES DE ACAO — MUITO IMPORTANTE:
+- Quando voce precisa executar uma acao (agendar, cancelar, mover, concluir), RESPONDA APENAS COM O BLOCO DE ACAO
+- NAO inclua confirmacoes de sucesso ou mensagens adicionais quando ha uma acao a executar
+- O sistema vai executar a acao e retornar o resultado real
+- Se nao ha acao a executar, responda normalmente com sua mensagem
+
+ACOES — inclua ao final da resposta APENAS quando necessario:
 \`\`\`action
 {"type":"agendar","params":{"clientId":123,"serviceId":45,"employeeId":2,"date":"2025-03-28","time":"14:00"}}
 \`\`\`
@@ -372,7 +375,13 @@ Tipos: agendar | cancelar | mover | concluir
 - agendar: {clientId, clientName, serviceId, employeeId, date, time}  ← incluir clientName sempre
 - cancelar: {appointmentId}
 - mover: {appointmentId, newDate, newTime}
-- concluir: {appointmentId}${buildMemoryPrompt()}`;
+- concluir: {appointmentId}
+
+REGRAS ADICIONAIS:
+11. Para cancelar/mover: confirme antes de executar
+12. Peca apenas o dado que falta — nunca peca o ID, voce mesmo descobre
+13. Mantenha o contexto da conversa anterior
+${buildMemoryPrompt()}`;
 }
 
 // ─── Dados contextuais ────────────────────────────────────
@@ -518,10 +527,9 @@ export async function handleMessageV2(userMessage: string): Promise<AgentV2Respo
       const pendingAct = JSON.parse(lastAssistant.content.replace("__PENDING_CONFLICT__", ""));
       addToHistory("user", userMessage);
       const forceResult = await executeAction(pendingAct);
-      const forceText = forceResult.includes("criado") ? forceResult : `Não foi possível forçar: ${forceResult}`;
-      addToHistory("assistant", forceText);
+      addToHistory("assistant", forceResult);
       const msgId2 = `m_${Date.now()}`;
-      return { text: forceText, actionExecuted: forceResult.includes("criado"), navigateTo: forceResult.includes("criado") ? "/agenda" : undefined, messageId: msgId2, userMessage };
+      return { text: forceResult, actionExecuted: forceResult.includes("✅"), navigateTo: forceResult.includes("✅") ? "/agenda" : undefined, messageId: msgId2, userMessage };
     } catch { /* continuar fluxo normal */ }
   }
 
@@ -560,27 +568,27 @@ export async function handleMessageV2(userMessage: string): Promise<AgentV2Respo
       // Se executeAction pediu profissional, nao executar — pedir ao usuario
       if (result.startsWith("AGUARDANDO_PROFISSIONAL:")) {
         const lista = result.replace("AGUARDANDO_PROFISSIONAL:", "");
-        text = raw.replace(/```action[\s\S]*?```/g, "").trim();
         const aviso = `Com qual profissional? Disponíveis: ${lista}`;
-        text = text ? `${text}\n\n${aviso}` : aviso;
+        text = aviso;
         addToHistory("assistant", `__PENDING_ACTION__${JSON.stringify(act)}`);
       } else if (result.startsWith("CONFLITO:")) {
         // Conflito detectado — não executar, avisar e aguardar confirmação explícita
         const detalhe = result.replace("CONFLITO:", "");
-        text = raw.replace(/```action[\s\S]*?```/g, "").trim();
         const aviso = `⚠️ Conflito de horário: ${detalhe}\nDeseja agendar mesmo assim? Responda "forçar agendamento" para confirmar.`;
-        text = text ? `${text}\n\n${aviso}` : aviso;
+        text = aviso;
         // Guardar action com flag forceConflict para reuso se usuário confirmar
         const pendingAct = { ...act, params: { ...act.params, forceConflict: true } };
         addToHistory("assistant", `__PENDING_CONFLICT__${JSON.stringify(pendingAct)}`);
       } else {
-        text = raw.replace(/```action[\s\S]*?```/g, "").trim();
-        text = text ? `${text}\n\n${result}` : result;
-        actionExecuted = true;
-        if (act.type === "agendar" && result.includes("criado")) navigateTo = "/agenda";
+        // Ação executada com sucesso ou erro — retornar o resultado real
+        text = result;
+        actionExecuted = result.includes("✅");
+        if (act.type === "agendar" && result.includes("✅")) navigateTo = "/agenda";
       }
-    } catch {
-      text = raw.replace(/```action[\s\S]*?```/g, "").trim();
+    } catch (err) {
+      // Erro ao parsear ou executar ação
+      text = `Erro ao processar ação: ${err instanceof Error ? err.message : "Desconhecido"}`;
+      console.error("[AgentV2] Erro ao processar ação:", err);
     }
   }
 
@@ -603,4 +611,4 @@ export async function testAgentV2Connection(token: string): Promise<{ ok: boolea
   } catch (err) {
     return { ok: false, message: err instanceof Error ? err.message : "Erro de rede." };
   }
-    }
+}
