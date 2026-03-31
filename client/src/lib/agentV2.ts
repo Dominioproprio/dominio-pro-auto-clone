@@ -415,13 +415,20 @@ async function executeAction(action: any): Promise<string> {
         new Date(newStart).getTime() + durMs
       ).toISOString().slice(0, 19);
 
-      // Validar horario de trabalho
+      // Validar horario de trabalho (aviso, nao bloqueio)
       const emp = employeesStore
         .list(true)
         .find((e: any) => e.id === appt.employeeId);
-      if (emp) {
+      if (emp && !params.forceConflict) {
         const whCheck = isWithinWorkingHours(emp, resolvedDate, resolvedTime);
-        if (!whCheck.ok) return whCheck.message!;
+        if (!whCheck.ok) {
+          const pendingAct = {
+            type: "mover",
+            params: { ...params, forceConflict: true },
+          };
+          savePendingAction(pendingAct, "conflict");
+          return `CONFLITO:${whCheck.message} Deseja mover mesmo assim?`;
+        }
       }
 
       // Verificar conflito no novo horario
@@ -600,9 +607,18 @@ async function executeSchedule(params: any): Promise<string> {
     return `AGUARDANDO_PROFISSIONAL:${lista}`;
   }
 
-  // 4. Validar horario de trabalho ────────────────────────
-  const whCheck = isWithinWorkingHours(emp, resolvedDate, resolvedTime);
-  if (!whCheck.ok) return whCheck.message!;
+  // 4. Validar horario de trabalho (aviso, nao bloqueio) ──
+  if (!params.forceConflict) {
+    const whCheck = isWithinWorkingHours(emp, resolvedDate, resolvedTime);
+    if (!whCheck.ok) {
+      const pendingAct = {
+        type: "agendar",
+        params: { ...params, forceConflict: true },
+      };
+      savePendingAction(pendingAct, "conflict");
+      return `CONFLITO:${whCheck.message} Deseja agendar mesmo assim?`;
+    }
+  }
 
   // 5. Calcular horarios ──────────────────────────────────
   const durationMinutes =
@@ -886,7 +902,7 @@ export async function handleMessageV2(
     // ─ Conflito: usuario confirmando ─
     if (pending.type === "conflict") {
       if (
-        /forç|forcar|força|mesmo\s*assim|pode|sim|confirma|confirmar|ok|claro|vai|manda|force|agendar/i.test(
+        /forç|forcar|força|mesmo\s*assim|pode|sim|confirma|confirmar|ok|claro|vai|manda|force|agendar|trabalha|trabalho|prosseguir|continuar/i.test(
           msgTrimmed
         )
       ) {
