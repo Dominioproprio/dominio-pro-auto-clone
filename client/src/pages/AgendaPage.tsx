@@ -550,12 +550,10 @@ export default function AgendaPage() {
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onCancel);
-    document.addEventListener("pointerleave", onCancel);
     return () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onCancel);
-      document.removeEventListener("pointerleave", onCancel);
     };
   }, [dragging, getEmpAtX, START_HOUR, END_HOUR, SNAP_MINUTES, currentDate]);
 
