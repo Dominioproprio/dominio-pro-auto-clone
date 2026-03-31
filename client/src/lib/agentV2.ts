@@ -89,10 +89,15 @@ async function getClientData(query: string): Promise<string> {
   const ql = q.toLowerCase();
   const fromCache = all.filter((c: any) =>
     c.name?.toLowerCase().includes(ql) || c.phone?.includes(q)
-  ).slice(0, 10);
+  );
+  
+  const results = fromCache.slice(0, 20);
+  const hasMore = fromCache.length > 20;
 
-  if (fromCache.length > 0) {
-    return `Clientes:\n${fromCache.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
+  if (results.length > 0) {
+    let text = `Clientes:\n${results.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
+    if (hasMore) text += `\n(Exibindo 20 de ${fromCache.length} resultados. Há mais clientes além destes.)`;
+    return text;
   }
 
   // 3. Cache vazio ou sem resultado — busca direto no Supabase (suporta acentos via ilike)
@@ -102,7 +107,11 @@ async function getClientData(query: string): Promise<string> {
       fromDB.forEach((c: any) => {
         if (!all.find((x: any) => x.id === c.id)) all.push(c);
       });
-      return `Clientes:\n${fromDB.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
+      const dbResults = fromDB.slice(0, 20);
+      const dbHasMore = fromDB.length > 20;
+      let text = `Clientes:\n${dbResults.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
+      if (dbHasMore) text += `\n(Exibindo 20 de ${fromDB.length} resultados. Há mais clientes além destes.)`;
+      return text;
     }
   } catch (err) {
     console.warn("[agentV2] Busca direta Supabase falhou, usando cache:", err);
@@ -259,7 +268,6 @@ async function executeAction(action: any): Promise<string> {
           serviceId: svc.id,
           name: svc.name,
           price: svc.price,
-          durationMinutes: svc.durationMinutes,
           color: svc.color ?? "#ec4899",
           materialCostPercent: svc.materialCostPercent ?? 0,
         }],
@@ -351,9 +359,10 @@ REGRAS:
 7. Se houver mais de um profissional e o usuario nao informou qual, SEMPRE pergunte antes de agendar
 8. Se houver apenas um profissional, use-o automaticamente sem perguntar
 9. Mantenha o contexto da conversa — se o cliente ja foi identificado em uma mensagem anterior, nao peca novamente
-7. Para cancelar/mover: confirme antes de executar
-8. Peca apenas o dado que falta — nunca peca o ID, voce mesmo descobre
-9. Mantenha o contexto da conversa anterior
+10. SEMPRE que a lista de resultados (clientes, agendamentos, etc.) indicar que há mais itens além dos exibidos, informe ao usuário que existem mais resultados e que ele pode ser mais específico na busca se não encontrar o que deseja.
+11. Para cancelar/mover: confirme antes de executar
+12. Peca apenas o dado que falta — nunca peca o ID, voce mesmo descobre
+13. Mantenha o contexto da conversa anterior
 
 ACOES — inclua ao final da resposta quando necessario:
 \`\`\`action
@@ -393,15 +402,22 @@ async function searchClientsData(query: string): Promise<string> {
   }
 
   if (found.length > 0) {
-    const results = found.slice(0, 10);
-    return `Clientes encontrados para "${query}" (${found.length} resultado(s)):\n${results.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
+    const results = found.slice(0, 20);
+    const hasMore = found.length > 20;
+    let text = `Clientes encontrados para "${query}" (${found.length} resultado(s)):\n${results.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
+    if (hasMore) text += `\n(Exibindo 20 de ${found.length} resultados. Há mais clientes além destes.)`;
+    return text;
   }
 
   // Fallback: busca direto no Supabase com ilike (suporta acentos)
   try {
     const fromDB = await clientsStore.search(q);
     if (fromDB.length > 0) {
-      return `Clientes encontrados para "${query}" (${fromDB.length} resultado(s)):\n${fromDB.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
+      const dbResults = fromDB.slice(0, 20);
+      const dbHasMore = fromDB.length > 20;
+      let text = `Clientes encontrados para "${query}" (${fromDB.length} resultado(s)):\n${dbResults.map((c: any) => `  - ID:${c.id} | ${c.name}${c.phone ? ` | ${c.phone}` : ""}`).join("\n")}`;
+      if (dbHasMore) text += `\n(Exibindo 20 de ${fromDB.length} resultados. Há mais clientes além destes.)`;
+      return text;
     }
   } catch (err) {
     console.warn("[agentV2] Fallback Supabase falhou:", err);
@@ -492,7 +508,6 @@ export function initAgentV2(config: AgentV2Config) { cfg = config; }
 
 export async function handleMessageV2(userMessage: string): Promise<AgentV2Response> {
   if (!cfg) return { text: "Agente nao configurado." };
-  if (!cfg.apiToken || cfg.apiToken === "proxy") return { text: "Configure seu GitHub Token para ativar o Agente IA." };
 
   // ── Detectar retomada de ação com conflito forçado ─────────
   const history_check = loadHistory();
@@ -588,5 +603,4 @@ export async function testAgentV2Connection(token: string): Promise<{ ok: boolea
   } catch (err) {
     return { ok: false, message: err instanceof Error ? err.message : "Erro de rede." };
   }
-}
-
+    }
