@@ -401,6 +401,40 @@ export const appointmentsStore = {
     cache.appointments = cache.appointments.filter(a => a.id !== id);
     await addAuditLog("appointment", id, "delete", `Agendamento #${id} removido`);
   },
+
+  /** Atualiza o cache local imediatamente (sem bater no Supabase).
+   *  Usado pelo drag-and-drop para feedback otimista antes de persistir. */
+  updateLocal(id: number, data: Partial<Appointment>): void {
+    const idx = cache.appointments.findIndex(a => a.id === id);
+    if (idx !== -1) {
+      cache.appointments[idx] = { ...cache.appointments[idx], ...data };
+    }
+  },
+
+  /** Move um agendamento para outro funcionário/horário e persiste no Supabase. */
+  async move(
+    id: number,
+    employeeId: number,
+    startTime: string,
+    endTime: string,
+  ): Promise<void> {
+    const { error } = await supabase
+      .from("appointments")
+      .update({ employee_id: employeeId, start_time: startTime, end_time: endTime })
+      .eq("id", id);
+    if (error) throw error;
+    // Sincroniza o cache com os valores confirmados pelo servidor
+    const idx = cache.appointments.findIndex(a => a.id === id);
+    if (idx !== -1) {
+      cache.appointments[idx] = {
+        ...cache.appointments[idx],
+        employeeId,
+        startTime,
+        endTime,
+      };
+    }
+    await addAuditLog("appointment", id, "update", `Agendamento #${id} reagendado via drag-and-drop`);
+  },
 };
 
 // ─── Cash Sessions ───────────────────────────────────────
