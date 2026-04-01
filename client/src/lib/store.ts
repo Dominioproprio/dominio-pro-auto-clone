@@ -112,6 +112,75 @@ export interface AuditLog {
 
 const toNum = (v: unknown) => parseFloat(String(v ?? 0)) || 0;
 
+
+const SEARCH_DEBUG_PREFIX = "[store]";
+
+function normalizeSearchText(value: string): string {
+  return (value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9@\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildPhoneticKey(value: string): string {
+  const base = normalizeSearchText(value)
+    .replace(/[aeiou]/g, "")
+    .replace(/ph/g, "f")
+    .replace(/y/g, "i")
+    .replace(/w/g, "v")
+    .replace(/h/g, "")
+    .replace(/(.)\1+/g, "$1");
+  return base.slice(0, 12);
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a) return b.length;
+  if (!b) return a.length;
+  const rows = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) rows[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      rows[i][j] = Math.min(
+        rows[i - 1][j] + 1,
+        rows[i][j - 1] + 1,
+        rows[i - 1][j - 1] + cost,
+      );
+    }
+  }
+  return rows[a.length][b.length];
+}
+
+function scoreClientMatch(query: string, candidate: Client): number {
+  const nq = normalizeSearchText(query);
+  const nc = normalizeSearchText(candidate.name);
+  if (!nq || !nc) return 0;
+  if (nc === nq) return 1;
+  if (nc.startsWith(nq)) return 0.96;
+  if (nc.includes(nq)) return 0.9;
+  const nqTokens = nq.split(" ").filter(Boolean);
+  if (nqTokens.length > 1 && nqTokens.every(token => nc.includes(token))) return 0.86;
+  if (buildPhoneticKey(nc) === buildPhoneticKey(nq)) return 0.8;
+  const ratio = 1 - (levenshtein(nq, nc) / Math.max(nq.length, nc.length));
+  return ratio >= 0.55 ? ratio * 0.72 : 0;
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[%_,]/g, (m) => `\${m}`);
+}
+
+function logDb(action: string, details?: unknown): void {
+  if (details === undefined) {
+    console.log(`${SEARCH_DEBUG_PREFIX} ${action}`);
+    return;
+  }
+  console.log(`${SEARCH_DEBUG_PREFIX} ${action}`, details);
+}
+
 // ─── Mappers (snake_case → camelCase) ────────────────────
 
 function toEmployee(r: any): Employee {
@@ -155,6 +224,7 @@ async function addAuditLog(entityType: string, entityId: number, action: string,
 // ─── Função de Busca em Lotes (Paginação Recursiva) ───────
 
 async function fetchAllFromTable(tableName: string, orderBy: string = "id"): Promise<any[]> {
+  logDb(`fetchAllFromTable:start ${tableName}`, { orderBy });
   let allData: any[] = [];
   let from = 0;
   let to = 999;
@@ -167,7 +237,11 @@ async function fetchAllFromTable(tableName: string, orderBy: string = "id"): Pro
       .order(orderBy)
       .range(from, to);
 
-    if (error) throw error;
+    if (error) {
+      logDb(`fetchAllFromTable:error ${tableName}`, error);
+      throw error;
+    }
+    logDb(`fetchAllFromTable:chunk ${tableName}`, { from, to, returned: data?.length ?? 0 });
     if (!data || data.length === 0) {
       hasMore = false;
     } else {
@@ -180,6 +254,7 @@ async function fetchAllFromTable(tableName: string, orderBy: string = "id"): Pro
       }
     }
   }
+  logDb(`fetchAllFromTable:done ${tableName}`, { total: allData.length });
   return allData;
 }
 
@@ -281,20 +356,99 @@ export const clientsStore = {
     return this.fetchAll();
   },
 
-  /** Busca clientes diretamente no Supabase por nome ou telefone.
-   *  Usa ilike para suportar acentos e case-insensitive.
-   *  Retorna até 20 resultados sem depender do cache. */
-  async search(query: string): Promise<Client[]> {
-    const q = query.trim();
-    if (!q) return [];
-    const { data, error } = await supabase
+  async count(): Promise<number> {
+    if (cache.clients.length > 0) return cache.clients.length;
+    const { count, error } = await supabase
       .from("clients")
-      .select("*")
-      .or(`name.ilike.%${q}%,phone.ilike.%${q}%`)
-      .order("name")
-      .limit(20);
+      .select("id", { count: "exact", head: true });
     if (error) throw error;
-    return (data ?? []).map(toClient);
+    return count ?? 0;
+  },
+
+  /** Busca clientes diretamente no Supabase sem depender de carregar a lista inteira.
+   *  Estratégia híbrida: wildcard + prefixo + score local (fuzzy/phonetic). */
+  async search(query: string, options?: { limit?: number }): Promise<Client[]> {
+    const q = query.trim();
+    const limit = options?.limit ?? 20;
+    if (!q) return [];
+
+    const uniqueRows = new Map<number, any>();
+    const addRows = (rows?: any[] | null) => {
+      for (const row of rows ?? []) uniqueRows.set(row.id, row);
+    };
+
+    const digits = q.replace(/\D/g, "");
+    const normalized = normalizeSearchText(q);
+    const tokens = Array.from(new Set(normalized.split(" ").filter(token => token.length >= 2)));
+    const safeQ = escapeLike(q);
+
+    logDb("clients.search:start", { query: q, limit, digitsLength: digits.length, tokens });
+
+    const wildcardOr = [
+      `name.ilike.%${safeQ}%`,
+      digits.length >= 3 ? `phone.ilike.%${digits}%` : null,
+      q.includes("@") ? `email.ilike.%${safeQ}%` : null,
+    ].filter(Boolean).join(",");
+
+    if (wildcardOr) {
+      const { data, error } = await supabase
+        .from("clients")
+        .select("*")
+        .or(wildcardOr)
+        .order("name")
+        .limit(Math.max(limit, 30));
+      logDb("clients.search:wildcard", { returned: data?.length ?? 0, error: error?.message ?? null });
+      if (error) throw error;
+      addRows(data);
+    }
+
+    if (uniqueRows.size < limit) {
+      for (const token of tokens.slice(0, 3)) {
+        const { data, error } = await supabase
+          .from("clients")
+          .select("*")
+          .ilike("name", `%${escapeLike(token)}%`)
+          .order("name")
+          .limit(30);
+        logDb("clients.search:token", { token, returned: data?.length ?? 0, error: error?.message ?? null });
+        if (error) throw error;
+        addRows(data);
+        if (uniqueRows.size >= limit * 2) break;
+      }
+    }
+
+    if (uniqueRows.size < limit) {
+      const firstLetter = q[0];
+      if (firstLetter) {
+        const { data, error } = await supabase
+          .from("clients")
+          .select("*")
+          .ilike("name", `${escapeLike(firstLetter)}%`)
+          .order("name")
+          .limit(120);
+        logDb("clients.search:first-letter", { firstLetter, returned: data?.length ?? 0, error: error?.message ?? null });
+        if (error) throw error;
+        addRows(data);
+      }
+    }
+
+    const ranked = Array.from(uniqueRows.values())
+      .map(toClient)
+      .map(client => ({
+        client,
+        score: Math.max(
+          scoreClientMatch(q, client),
+          digits.length >= 3 && client.phone?.replace(/\D/g, "").includes(digits) ? 0.92 : 0,
+          q.includes("@") && client.email && normalizeSearchText(client.email).includes(normalizeSearchText(q)) ? 0.9 : 0,
+        ),
+      }))
+      .filter(item => item.score >= 0.45)
+      .sort((a, b) => b.score - a.score || a.client.name.localeCompare(b.client.name, "pt-BR"))
+      .slice(0, limit)
+      .map(item => item.client);
+
+    logDb("clients.search:done", { query: q, matched: ranked.length, ids: ranked.map(c => c.id) });
+    return ranked;
   },
 
   async fetchAll(): Promise<Client[]> {
@@ -303,14 +457,43 @@ export const clientsStore = {
     return cache.clients;
   },
   async create(data: Omit<Client, "id" | "createdAt">): Promise<Client> {
+    logDb("clients.create:start", data);
     const { data: row, error } = await supabase.from("clients").insert({ name: data.name, email: data.email, phone: data.phone, birth_date: data.birthDate, cpf: data.cpf, address: data.address, notes: data.notes }).select().single();
-    if (error) throw error;
+    if (error) {
+      logDb("clients.create:error", error);
+      throw error;
+    }
     const cli = toClient(row);
     cache.clients.push(cli);
+    logDb("clients.create:success", cli);
     await addAuditLog("client", cli.id, "create", `Cliente "${cli.name}" criado`);
     return cli;
   },
+
+  async createMany(items: Omit<Client, "id" | "createdAt">[]): Promise<Client[]> {
+    if (!items.length) return [];
+    logDb("clients.createMany:start", { count: items.length });
+    const payload = items.map(data => ({
+      name: data.name,
+      email: data.email,
+      phone: data.phone,
+      birth_date: data.birthDate,
+      cpf: data.cpf,
+      address: data.address,
+      notes: data.notes,
+    }));
+    const { data: rows, error } = await supabase.from("clients").insert(payload).select();
+    if (error) {
+      logDb("clients.createMany:error", error);
+      throw error;
+    }
+    const created = (rows ?? []).map(toClient);
+    cache.clients.push(...created);
+    logDb("clients.createMany:success", { created: created.length });
+    return created;
+  },
   async update(id: number, data: Partial<Client>): Promise<Client | null> {
+    logDb("clients.update:start", { id, data });
     const p: any = {};
     if (data.name !== undefined) p.name = data.name;
     if (data.email !== undefined) p.email = data.email;
@@ -320,29 +503,56 @@ export const clientsStore = {
     if (data.address !== undefined) p.address = data.address;
     if (data.notes !== undefined) p.notes = data.notes;
     const { data: row, error } = await supabase.from("clients").update(p).eq("id", id).select().single();
-    if (error) throw error;
+    if (error) {
+      logDb("clients.update:error", error);
+      throw error;
+    }
     const cli = toClient(row);
     const idx = cache.clients.findIndex(c => c.id === id);
     if (idx !== -1) cache.clients[idx] = cli;
+    logDb("clients.update:success", cli);
     await addAuditLog("client", id, "update", `Cliente "${cli.name}" atualizado`);
     return cli;
   },
   async delete(id: number): Promise<void> {
     const cli = cache.clients.find(c => c.id === id);
-    await supabase.from("clients").delete().eq("id", id);
+    logDb("clients.delete:start", { id, name: cli?.name ?? null });
+    const { error } = await supabase.from("clients").delete().eq("id", id);
+    if (error) {
+      logDb("clients.delete:error", error);
+      throw error;
+    }
     cache.clients = cache.clients.filter(c => c.id !== id);
+    logDb("clients.delete:success", { id });
     if (cli) await addAuditLog("client", id, "delete", `Cliente "${cli.name}" removido`);
+  },
+
+  async clearAll(): Promise<void> {
+    logDb("clients.clearAll:start");
+    const { error } = await supabase.from("clients").delete().neq("id", 0);
+    if (error) {
+      logDb("clients.clearAll:error", error);
+      throw error;
+    }
+    cache.clients = [];
+    logDb("clients.clearAll:success");
   },
 };
 
 // ─── Appointments ────────────────────────────────────────
 
 export const appointmentsStore = {
-  list(filter?: { date?: string; employeeId?: number }): Appointment[] {
+  list(filter?: { date?: string; employeeId?: number; startDate?: string; endDate?: string }): Appointment[] {
     let list = [...cache.appointments];
     if (filter?.date) list = list.filter(a => a.startTime.startsWith(filter.date!));
+    if (filter?.startDate) list = list.filter(a => a.startTime.slice(0, 10) >= filter.startDate!);
+    if (filter?.endDate) list = list.filter(a => a.startTime.slice(0, 10) <= filter.endDate!);
     if (filter?.employeeId) list = list.filter(a => a.employeeId === filter.employeeId);
     return list;
+  },
+
+  get(id: number): Appointment | null {
+    return cache.appointments.find(a => a.id === id) ?? null;
   },
   async fetchAll(): Promise<Appointment[]> {
     const data = await fetchAllFromTable("appointments", "start_time");
@@ -350,6 +560,7 @@ export const appointmentsStore = {
     return cache.appointments;
   },
   async create(data: Omit<Appointment, "id" | "createdAt">): Promise<Appointment> {
+    logDb("appointments.create:start", data);
     const { data: row, error } = await supabase.from("appointments").insert({ client_name: data.clientName, client_id: data.clientId, employee_id: data.employeeId, start_time: data.startTime, end_time: data.endTime, status: data.status, total_price: data.totalPrice, notes: data.notes, payment_status: data.paymentStatus, group_id: data.groupId, services: data.services }).select().single();
     if (error) {
       // Enriquecer o erro com contexto para diagnóstico
@@ -362,15 +573,17 @@ export const appointmentsStore = {
       (enriched as any).code = error.code;
       (enriched as any).details = error.details;
       (enriched as any).hint = error.hint;
-      console.error("[store] appointments.create error:", error, "data:", data);
+      logDb("appointments.create:error", { error, data });
       throw enriched;
     }
     const appt = toAppointment(row);
     cache.appointments.push(appt);
+    logDb("appointments.create:success", appt);
     await addAuditLog("appointment", appt.id, "create", `Agendamento para "${appt.clientName}" criado`);
     return appt;
   },
   async update(id: number, data: Partial<Appointment>): Promise<Appointment | null> {
+    logDb("appointments.update:start", { id, data });
     const p: any = {};
     if (data.clientName !== undefined) p.client_name = data.clientName;
     if (data.clientId !== undefined) p.client_id = data.clientId;
@@ -384,11 +597,15 @@ export const appointmentsStore = {
     if (data.groupId !== undefined) p.group_id = data.groupId;
     if (data.services !== undefined) p.services = data.services;
     const { data: row, error } = await supabase.from("appointments").update(p).eq("id", id).select().single();
-    if (error) throw error;
+    if (error) {
+      logDb("appointments.update:error", { id, error, payload: p });
+      throw error;
+    }
     const appt = toAppointment(row);
     const idx = cache.appointments.findIndex(a => a.id === id);
     if (idx !== -1) cache.appointments[idx] = appt;
-    
+    logDb("appointments.update:success", appt);
+
     if (data.status === "completed" && appt.paymentStatus !== "paid") {
       await autoLaunchCashEntry(appt);
     }
@@ -411,6 +628,24 @@ export const appointmentsStore = {
     }
   },
 
+  async fetchByClientIds(clientIds: number[]): Promise<Appointment[]> {
+    const ids = Array.from(new Set(clientIds.filter(Boolean)));
+    if (!ids.length) return [];
+    const { data, error } = await supabase
+      .from("appointments")
+      .select("*")
+      .in("client_id", ids)
+      .neq("status", "cancelled")
+      .order("start_time", { ascending: false })
+      .limit(Math.max(ids.length * 4, 20));
+    if (error) {
+      logDb("appointments.fetchByClientIds:error", { ids, error });
+      throw error;
+    }
+    logDb("appointments.fetchByClientIds:success", { ids, returned: data?.length ?? 0 });
+    return (data ?? []).map(toAppointment);
+  },
+
   /** Move um agendamento para outro funcionário/horário e persiste no Supabase. */
   async move(
     id: number,
@@ -418,6 +653,7 @@ export const appointmentsStore = {
     startTime: string,
     endTime: string,
   ): Promise<void> {
+    logDb("appointments.move:start", { id, employeeId, startTime, endTime });
     const { error } = await supabase
       .from("appointments")
       .update({ employee_id: employeeId, start_time: startTime, end_time: endTime })
@@ -433,6 +669,7 @@ export const appointmentsStore = {
         endTime,
       };
     }
+    logDb("appointments.move:success", { id, employeeId, startTime, endTime });
     await addAuditLog("appointment", id, "update", `Agendamento #${id} reagendado via drag-and-drop`);
   },
 };
@@ -448,11 +685,14 @@ export const cashSessionsStore = {
     cache.cashSessions = (data ?? []).map(toCashSession);
     return cache.cashSessions;
   },
-  async open(openingBalance: number): Promise<CashSession> {
-    const { data: row, error } = await supabase.from("cash_sessions").insert({ opened_at: new Date().toISOString(), opening_balance: openingBalance, status: "open" }).select().single();
+  async open(openingBalance: number, openedDate?: string): Promise<CashSession> {
+    const openedAt = openedDate ? `${openedDate}T00:00:00.000Z` : new Date().toISOString();
+    logDb("cashSessions.open:start", { openingBalance, openedAt });
+    const { data: row, error } = await supabase.from("cash_sessions").insert({ opened_at: openedAt, opening_balance: openingBalance, status: "open" }).select().single();
     if (error) throw error;
     const session = toCashSession(row);
     cache.cashSessions.unshift(session);
+    logDb("cashSessions.open:success", session);
     await addAuditLog("cash_session", session.id, "open", `Caixa aberto com R$ ${openingBalance.toFixed(2)}`);
     return session;
   },
@@ -463,6 +703,29 @@ export const cashSessionsStore = {
     const idx = cache.cashSessions.findIndex(s => s.id === id);
     if (idx !== -1) cache.cashSessions[idx] = session;
     await addAuditLog("cash_session", id, "close", `Caixa fechado. Receita: R$ ${data.totalRevenue.toFixed(2)}`);
+    return session;
+  },
+
+  async reopen(id: number): Promise<CashSession> {
+    const current = cache.cashSessions.find(s => s.status === "open" && s.id !== id);
+    if (current) throw new Error("Feche o caixa atual antes de reabrir outro.");
+    logDb("cashSessions.reopen:start", { id });
+    const { data: row, error } = await supabase
+      .from("cash_sessions")
+      .update({ status: "open", closed_at: null })
+      .eq("id", id)
+      .select()
+      .single();
+    if (error) {
+      logDb("cashSessions.reopen:error", error);
+      throw error;
+    }
+    const session = toCashSession(row);
+    cache.cashSessions = cache.cashSessions.map(item => item.id === id ? session : { ...item, status: item.id === id ? item.status : item.status });
+    const idx = cache.cashSessions.findIndex(s => s.id === id);
+    if (idx !== -1) cache.cashSessions[idx] = session;
+    logDb("cashSessions.reopen:success", session);
+    await addAuditLog("cash_session", id, "reopen", `Caixa #${id} reaberto`);
     return session;
   },
 };
