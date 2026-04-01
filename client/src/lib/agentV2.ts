@@ -528,14 +528,30 @@ async function executeSchedule(params: any): Promise<string> {
     }
   }
 
+  // Último recurso: ILIKE direto no Supabase (independe do cache)
+  if (!client && paramClientName) {
+    console.log(`[agentV2] executeSchedule: cache falhou → ILIKE Supabase para "${paramClientName}"`);
+    try {
+      const supabaseResults = await clientsStore.search(paramClientName);
+      console.log(`[agentV2] executeSchedule: Supabase retornou ${supabaseResults.length} resultado(s)`);
+      if (supabaseResults.length === 1) {
+        client = supabaseResults[0];
+        console.log(`[agentV2] executeSchedule: cliente resolvido via Supabase → id=${client.id}`);
+      } else if (supabaseResults.length > 1) {
+        const names = supabaseResults.slice(0, 5).map((c: any) => `${c.name} (ID:${c.id})`).join(", ");
+        return `Encontrei varios clientes com "${paramClientName}": ${names}. Qual deles?`;
+      }
+    } catch (err) {
+      console.error(`[agentV2] executeSchedule: ERRO Supabase search:`, err);
+    }
+  }
+
   if (!client) {
     const similar = allClients
       .filter(
         (c: any) =>
           paramClientName &&
-          c.name.toLowerCase().includes(
-            paramClientName.toLowerCase().split(" ")[0]
-          )
+          normalizeStr(c.name).includes(normalizeStr(paramClientName.split(" ")[0]))
       )
       .slice(0, 3)
       .map((c: any) => c.name)
@@ -719,6 +735,13 @@ INSTRUCOES DE ACAO — MUITO IMPORTANTE:
 - Se falta informacao (cliente, servico, horario), pergunte APENAS o que falta — NAO inclua bloco action nesse caso
 - Se o usuario pediu para agendar e voce tem TODOS os dados necessarios (cliente, servico, horario, data), INCLUA o bloco action imediatamente
 
+COMO USAR OS DADOS DE CLIENTES:
+- Os dados do sistema incluem linhas no formato: "ID:123 | Nome do Cliente | telefone | Ultimo servico: X em YYYY-MM-DD"
+- O numero apos "ID:" e o clientId — use ESSE numero exato no bloco action
+- NUNCA invente um clientId — sempre use o ID que aparece nos dados fornecidos
+- Se o cliente nao aparece nos dados, diga que nao encontrou e peca para confirmar o nome
+- Se aparecerem varios clientes com nome similar, liste-os e pergunte qual e o correto
+
 ACOES — inclua ao final da resposta APENAS quando necessario:
 \`\`\`action
 {"type":"agendar","params":{"clientId":123,"clientName":"Nome","serviceId":45,"employeeId":2,"date":"hoje","time":"14:00"}}
@@ -735,6 +758,7 @@ REGRAS ADICIONAIS:
 15. Se o usuario diz apenas um horario (ex: "as 14"), use a data de hoje
 16. Se o usuario diz um nome que e de profissional, NAO busque como cliente
 17. Quando o sistema retornar um conflito ou erro, informe o usuario de forma clara
+18. NUNCA diga "nao encontrei" se os dados do sistema mostram o cliente — leia os dados com atencao antes de responder
 ${buildMemoryPrompt()}`;
 }
 
@@ -744,54 +768,84 @@ async function gatherData(msg: string): Promise<string> {
   const q = msg.toLowerCase();
   const parts: string[] = [getTodayData(), getEmployeesData(), getServicesData()];
 
-  // Extrair candidatos a nome de cliente da mensagem
-  const empsLower = new Set(
-    employeesStore
-      .list(true)
-      .flatMap((e: any) => e.name.toLowerCase().split(" "))
+  // ── Estratégia de extração de nome do cliente ────────────────────────────
+  // Prioridade 1: padrão explícito "cliente X" ou "para o cliente X"
+  // Prioridade 2: padrão "procurar/buscar X"
+  // Prioridade 3: heurística por palavras (fallback)
+  // Em todos os casos: busca com NFD normalizado + ILIKE fallback
+
+  let searchTerm: string | null = null;
+
+  // Prioridade 1 — "cliente Eduardo", "para a cliente Soraia Marcela"
+  const clienteMatch = msg.match(
+    /(?:^|\s)(?:o\s+cliente|a\s+cliente|cliente)\s+([A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ\s]{1,49})(?=\s+(?:amanhã|amanha|hoje|às|as|para|com|no|na|$)|$)/i
   );
-  const svcsLower = new Set(
-    servicesStore
-      .list(true)
-      .flatMap((s: any) => s.name.toLowerCase().split(" "))
-  );
+  if (clienteMatch?.[1]) {
+    searchTerm = clienteMatch[1].trim();
+    console.log(`[agentV2] gatherData: padrão "cliente X" → "${searchTerm}"`);
+  }
 
-  const stopWords = new Set([
-    "quero", "agendar", "marcar", "cliente", "para", "preciso", "cancelar",
-    "mover", "agenda", "hoje", "amanha", "hora", "servico", "horario",
-    "consegue", "executar", "agendamento", "voce", "fazer", "nome", "tenho",
-    "qual", "quais", "pode", "como", "quanto", "tempo", "duracao",
-    "compreende", "corte", "escova", "tintura", "manicure", "pedicure",
-    "barba", "hidrata", "progressiva", "termica", "relaxamento", "botox",
-    "coloracao", "luzes", "alisamento", "massagem", "unhas", "masculino",
-    "feminino", "sim", "nao", "forcar", "confirma", "confirmar", "forca",
-    "mesmo", "assim", "deixa", "esquece", "cancelado", "mova", "mude",
-    "concluir", "fechar", "abrir", "buscar", "procurar",
-  ]);
+  // Prioridade 2 — "procurar/buscar X", "procure por X", "quem é X"
+  if (!searchTerm) {
+    const buscaMatch = msg.match(
+      /(?:procure?(?:\s+por)?|buscar?|busque|encontre?|quem\s+[eé])\s+([A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ\s]{1,49})(?=[,.]|\s+(?:no\s+sistema|cadastrado|$)|$)/i
+    );
+    if (buscaMatch?.[1]) {
+      searchTerm = buscaMatch[1].trim();
+      console.log(`[agentV2] gatherData: padrão "buscar X" → "${searchTerm}"`);
+    }
+  }
 
-  const words = msg
-    .split(/\s+/)
-    .filter((w) => w.length > 2 && /^[A-Za-zÀ-ÖØ-öø-ÿ]/.test(w));
-  const candidateNames = words.filter((w) => {
-    const wl = w.toLowerCase();
-    return !stopWords.has(wl) && !empsLower.has(wl) && !svcsLower.has(wl);
-  });
+  // Prioridade 3 — heurística por palavras (mantida como fallback, mas com NFD)
+  if (!searchTerm) {
+    const empNames = new Set(
+      employeesStore.list(true).flatMap((e: any) => normalizeStr(e.name).split(" "))
+    );
+    const svcNames = new Set(
+      servicesStore.list(true).flatMap((s: any) => normalizeStr(s.name).split(" "))
+    );
+    const stopWords = new Set([
+      "que", "nao", "sim", "para", "com", "uma", "uns", "umas", "por",
+      "quero", "agendar", "marcar", "cliente", "preciso", "cancelar",
+      "mover", "agenda", "hoje", "amanha", "hora", "servico", "horario",
+      "consegue", "executar", "agendamento", "voce", "fazer", "nome",
+      "qual", "quais", "pode", "como", "quanto", "tempo", "duracao",
+      "confirma", "confirmar", "mesmo", "assim", "deixa", "esquece",
+      "concluir", "fechar", "abrir", "buscar", "procurar", "liste",
+      "listar", "ultimos", "ultimas", "sistema", "agora", "cadastrado",
+      "cadastrados", "tenho", "temos", "informacoes", "informacao",
+    ]);
 
-  console.log(`[agentV2] gatherData: candidateNames extraídos:`, candidateNames);
+    const words = msg
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && /^[A-Za-zÀ-ÖØ-öø-ÿ]/.test(w));
 
-  if (candidateNames.length > 0) {
-    const searchTerm = candidateNames.join(" ");
+    const candidates = words.filter((w) => {
+      const wNorm = normalizeStr(w);
+      return !stopWords.has(wNorm) && !empNames.has(wNorm) && !svcNames.has(wNorm);
+    });
+
+    console.log(`[agentV2] gatherData: heurística candidateNames=`, candidates);
+
+    if (candidates.length > 0) {
+      searchTerm = candidates.join(" ");
+      console.log(`[agentV2] gatherData: heurística → "${searchTerm}"`);
+    }
+  }
+
+  // ── Executar busca ───────────────────────────────────────────────────────
+  if (searchTerm) {
     console.log(`[agentV2] gatherData: buscando cliente com termo="${searchTerm}"`);
     parts.push(await getClientWithHistory(searchTerm));
   } else {
     const all = await clientsStore.ensureLoaded();
-    console.log(`[agentV2] gatherData: sem candidatos de nome, cache=${all.length} clientes`);
+    console.log(`[agentV2] gatherData: sem termo de busca, cache=${all.length} clientes`);
     parts.push(
-      `Total clientes cadastrados: ${all.length}. Use busca por nome para localizar.`
+      `Total clientes cadastrados: ${all.length}. Use busca por nome para localizar clientes especificos.`
     );
   }
 
-  // Se menciona data especifica, buscar agendamentos dessa data
+  // ── Data específica ──────────────────────────────────────────────────────
   const dateMatch = q.match(
     /\b(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|amanha|amanhã|segunda|terca|terça|quarta|quinta|sexta|sabado|sábado|domingo)\b/i
   );
@@ -1098,4 +1152,3 @@ export async function testAgentV2Connection(
     };
   }
 }
-
