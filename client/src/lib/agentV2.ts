@@ -286,27 +286,38 @@ function getApptsByDate(dateStr: string): string {
 
 // ─── Busca de clientes com historico ─────────────────────
 
+function normalizeStr(s: string): string {
+  return s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").trim();
+}
+
 async function getClientWithHistory(query: string): Promise<string> {
   const q = query.trim();
+  console.log(`[agentV2] getClientWithHistory: query="${q}"`);
+
   if (!q) {
     const all = await clientsStore.ensureLoaded();
+    console.log(`[agentV2] getClientWithHistory: query vazia, total=${all.length}`);
     return `Total clientes: ${all.length}`;
   }
 
-  const ql = q.toLowerCase();
+  const ql = normalizeStr(q);
   const all = await clientsStore.ensureLoaded();
+  console.log(`[agentV2] getClientWithHistory: cache tem ${all.length} clientes, buscando "${ql}"`);
 
-  // Busca no cache
+  // Busca no cache com normalização NFD (ignora acentos e case)
   let found = all.filter((c: any) =>
-    c.name?.toLowerCase().includes(ql) || c.phone?.includes(q)
+    normalizeStr(c.name ?? "").includes(ql) || c.phone?.includes(q)
   );
+  console.log(`[agentV2] getClientWithHistory: ${found.length} resultado(s) no cache`);
 
-  // Fallback: busca no Supabase (suporta acentos via ilike)
+  // Fallback: busca no Supabase com ILIKE (suporta acentos nativamente via collation)
   if (found.length === 0) {
+    console.log(`[agentV2] getClientWithHistory: cache zerou → ILIKE no Supabase para "${q}"`);
     try {
       found = await clientsStore.search(q);
+      console.log(`[agentV2] getClientWithHistory: Supabase retornou ${found.length} resultado(s)`);
     } catch (err) {
-      console.warn("[agentV2] Busca Supabase falhou:", err);
+      console.error("[agentV2] getClientWithHistory: ERRO Supabase:", err);
     }
   }
 
@@ -480,29 +491,30 @@ async function executeSchedule(params: any): Promise<string> {
       allClients.find((c: any) => String(c.id) === String(clientId)) ?? null;
   }
 
-  // Por nome exato
+  // Por nome exato (com NFD — ignora acentos)
   if (!client && paramClientName) {
-    const nameLower = paramClientName.toLowerCase().trim();
-    client =
-      allClients.find((c: any) => c.name.toLowerCase() === nameLower) ?? null;
+    const nameNorm = normalizeStr(paramClientName);
+    console.log(`[agentV2] executeSchedule: buscando cliente por nome exato norm="${nameNorm}"`);
+    client = allClients.find((c: any) => normalizeStr(c.name) === nameNorm) ?? null;
+    if (client) console.log(`[agentV2] executeSchedule: match exato → id=${client.id}`);
   }
 
-  // Por nome parcial
+  // Por nome parcial (com NFD)
   if (!client && paramClientName) {
-    const nameLower = paramClientName.toLowerCase().trim();
-    client =
-      allClients.find((c: any) => {
-        const cn = c.name.toLowerCase();
-        return cn.includes(nameLower) || nameLower.includes(cn);
-      }) ?? null;
+    const nameNorm = normalizeStr(paramClientName);
+    client = allClients.find((c: any) => {
+      const cn = normalizeStr(c.name);
+      return cn.includes(nameNorm) || nameNorm.includes(cn);
+    }) ?? null;
+    if (client) console.log(`[agentV2] executeSchedule: match parcial → id=${client.id}`);
   }
 
-  // Por primeiro nome (unico resultado)
+  // Por primeiro nome (unico resultado) com NFD
   if (!client && paramClientName) {
-    const firstName = paramClientName.toLowerCase().split(" ")[0];
+    const firstName = normalizeStr(paramClientName).split(" ")[0];
     if (firstName.length > 2) {
       const matches = allClients.filter((c: any) =>
-        c.name.toLowerCase().includes(firstName)
+        normalizeStr(c.name).includes(firstName)
       );
       if (matches.length === 1) {
         client = matches[0];
@@ -608,14 +620,14 @@ async function executeSchedule(params: any): Promise<string> {
     return `CONFLITO:${emp.name} ja tem agendamento das ${conflictHour} as ${conflictEnd} (${conflict.clientName ?? "cliente"}). Para forcar mesmo assim, confirme explicitamente.`;
   }
 
-  // 7. Criar agendamento ──────────────────────────────────
-  const created = await appointmentsStore.create({
+  // 7. Criar agendamento ── com try/catch para capturar erros reais do banco
+  const createPayload = {
     clientName: client.name,
     clientId: client.id,
     employeeId: emp.id,
     startTime,
     endTime,
-    status: "scheduled",
+    status: "scheduled" as const,
     totalPrice: svc.price,
     notes: null,
     paymentStatus: null,
@@ -630,10 +642,29 @@ async function executeSchedule(params: any): Promise<string> {
         materialCostPercent: svc.materialCostPercent ?? 0,
       },
     ],
-  });
+  };
+  console.log(`[agentV2] executeSchedule: enviando para Supabase →`, JSON.stringify({
+    clientId: createPayload.clientId,
+    clientName: createPayload.clientName,
+    employeeId: createPayload.employeeId,
+    startTime: createPayload.startTime,
+    endTime: createPayload.endTime,
+    serviceId: createPayload.services[0].serviceId,
+  }));
+
+  let created: any;
+  try {
+    created = await appointmentsStore.create(createPayload);
+    console.log(`[agentV2] executeSchedule: SUCESSO → id=${created?.id}`);
+  } catch (err: any) {
+    console.error(`[agentV2] executeSchedule: ERRO ao persistir no banco:`, err);
+    const detail = err?.message ?? err?.details ?? err?.code ?? "erro desconhecido";
+    return `Erro ao criar agendamento no banco: ${detail}. O agendamento NÃO foi salvo. Verifique o console para detalhes.`;
+  }
 
   if (!created || !created.id) {
-    return `Erro ao criar agendamento no banco. Verifique os dados e tente novamente.`;
+    console.error(`[agentV2] executeSchedule: create retornou vazio/sem id`, created);
+    return `Erro ao criar agendamento: banco não retornou confirmação. O agendamento pode não ter sido salvo.`;
   }
 
   window.dispatchEvent(new Event("store_updated"));
@@ -746,11 +777,15 @@ async function gatherData(msg: string): Promise<string> {
     return !stopWords.has(wl) && !empsLower.has(wl) && !svcsLower.has(wl);
   });
 
+  console.log(`[agentV2] gatherData: candidateNames extraídos:`, candidateNames);
+
   if (candidateNames.length > 0) {
     const searchTerm = candidateNames.join(" ");
+    console.log(`[agentV2] gatherData: buscando cliente com termo="${searchTerm}"`);
     parts.push(await getClientWithHistory(searchTerm));
   } else {
     const all = await clientsStore.ensureLoaded();
+    console.log(`[agentV2] gatherData: sem candidatos de nome, cache=${all.length} clientes`);
     parts.push(
       `Total clientes cadastrados: ${all.length}. Use busca por nome para localizar.`
     );
@@ -1063,3 +1098,4 @@ export async function testAgentV2Connection(
     };
   }
 }
+
