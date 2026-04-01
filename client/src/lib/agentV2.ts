@@ -286,73 +286,60 @@ function getApptsByDate(dateStr: string): string {
 
 // ─── Busca de clientes com historico ─────────────────────
 
-function normalizeStr(s: string): string {
-  return s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").trim();
-}
-
 async function getClientWithHistory(query: string): Promise<string> {
   const q = query.trim();
-  console.log(`[agentV2] getClientWithHistory: query="${q}"`);
-
   if (!q) {
-    const all = await clientsStore.ensureLoaded();
-    console.log(`[agentV2] getClientWithHistory: query vazia, total=${all.length}`);
-    return `Total clientes: ${all.length}`;
+    const total = await clientsStore.count();
+    return `Total clientes: ${total}`;
   }
 
-  const ql = normalizeStr(q);
-  const all = await clientsStore.ensureLoaded();
-  console.log(`[agentV2] getClientWithHistory: cache tem ${all.length} clientes, buscando "${ql}"`);
-
-  // Busca no cache com normalização NFD (ignora acentos e case)
-  let found = all.filter((c: any) =>
-    normalizeStr(c.name ?? "").includes(ql) || c.phone?.includes(q)
-  );
-  console.log(`[agentV2] getClientWithHistory: ${found.length} resultado(s) no cache`);
-
-  // Fallback: busca no Supabase com ILIKE (suporta acentos nativamente via collation)
-  if (found.length === 0) {
-    console.log(`[agentV2] getClientWithHistory: cache zerou → ILIKE no Supabase para "${q}"`);
-    try {
-      found = await clientsStore.search(q);
-      console.log(`[agentV2] getClientWithHistory: Supabase retornou ${found.length} resultado(s)`);
-    } catch (err) {
-      console.error("[agentV2] getClientWithHistory: ERRO Supabase:", err);
-    }
+  let found: any[] = [];
+  try {
+    found = await clientsStore.search(q, { limit: 15 });
+    console.log("[agentV2] getClientWithHistory:search", {
+      query: q,
+      found: found.length,
+      ids: found.map((c: any) => c.id),
+    });
+  } catch (err) {
+    console.warn("[agentV2] Busca Supabase falhou:", err);
   }
 
   if (found.length === 0) {
-    return `Nenhum cliente encontrado com "${query}". Total no sistema: ${all.length}.`;
+    const total = await clientsStore.count();
+    return `Nenhum cliente encontrado com "${query}". Total no sistema: ${total}.`;
   }
 
-  const results = found.slice(0, 15);
+  let recentAppointments: any[] = [];
+  try {
+    recentAppointments = await appointmentsStore.fetchByClientIds(
+      found.map((c: any) => c.id),
+    );
+  } catch (err) {
+    console.warn("[agentV2] Busca de histórico falhou:", err);
+  }
+
+  const lastByClient = new Map<string, any>();
+  for (const appt of recentAppointments) {
+    const key = String(appt.clientId ?? "");
+    if (!key || lastByClient.has(key)) continue;
+    lastByClient.set(key, appt);
+  }
+
   const lines: string[] = [];
-
-  for (const c of results) {
+  for (const c of found) {
     let line = `  - ID:${c.id} | ${c.name}`;
     if (c.phone) line += ` | ${c.phone}`;
-
-    // Buscar ultimo agendamento deste cliente para sugestao
-    const clientAppts = appointmentsStore
-      .list({})
-      .filter((a: any) => a.clientId === c.id && a.status !== "cancelled")
-      .sort((a: any, b: any) => b.startTime.localeCompare(a.startTime));
-
-    if (clientAppts.length > 0) {
-      const last = clientAppts[0];
+    const last = lastByClient.get(String(c.id));
+    if (last) {
       const lastSvc = last.services?.[0]?.name ?? "";
       const lastDate = last.startTime?.split("T")[0] ?? "";
       line += ` | Ultimo servico: ${lastSvc} em ${lastDate}`;
     }
-
     lines.push(line);
   }
 
-  let text = `Clientes encontrados (${found.length}):\n${lines.join("\n")}`;
-  if (found.length > 15) {
-    text += `\n(Exibindo 15 de ${found.length}. Seja mais especifico para refinar.)`;
-  }
-  return text;
+  return `Clientes encontrados (${found.length}):\n${lines.join("\n")}`;
 }
 
 // ─── Execucao de acoes ────────────────────────────────────
@@ -491,30 +478,29 @@ async function executeSchedule(params: any): Promise<string> {
       allClients.find((c: any) => String(c.id) === String(clientId)) ?? null;
   }
 
-  // Por nome exato (com NFD — ignora acentos)
+  // Por nome exato
   if (!client && paramClientName) {
-    const nameNorm = normalizeStr(paramClientName);
-    console.log(`[agentV2] executeSchedule: buscando cliente por nome exato norm="${nameNorm}"`);
-    client = allClients.find((c: any) => normalizeStr(c.name) === nameNorm) ?? null;
-    if (client) console.log(`[agentV2] executeSchedule: match exato → id=${client.id}`);
+    const nameLower = paramClientName.toLowerCase().trim();
+    client =
+      allClients.find((c: any) => c.name.toLowerCase() === nameLower) ?? null;
   }
 
-  // Por nome parcial (com NFD)
+  // Por nome parcial
   if (!client && paramClientName) {
-    const nameNorm = normalizeStr(paramClientName);
-    client = allClients.find((c: any) => {
-      const cn = normalizeStr(c.name);
-      return cn.includes(nameNorm) || nameNorm.includes(cn);
-    }) ?? null;
-    if (client) console.log(`[agentV2] executeSchedule: match parcial → id=${client.id}`);
+    const nameLower = paramClientName.toLowerCase().trim();
+    client =
+      allClients.find((c: any) => {
+        const cn = c.name.toLowerCase();
+        return cn.includes(nameLower) || nameLower.includes(cn);
+      }) ?? null;
   }
 
-  // Por primeiro nome (unico resultado) com NFD
+  // Por primeiro nome (unico resultado)
   if (!client && paramClientName) {
-    const firstName = normalizeStr(paramClientName).split(" ")[0];
+    const firstName = paramClientName.toLowerCase().split(" ")[0];
     if (firstName.length > 2) {
       const matches = allClients.filter((c: any) =>
-        normalizeStr(c.name).includes(firstName)
+        c.name.toLowerCase().includes(firstName)
       );
       if (matches.length === 1) {
         client = matches[0];
@@ -528,30 +514,14 @@ async function executeSchedule(params: any): Promise<string> {
     }
   }
 
-  // Último recurso: ILIKE direto no Supabase (independe do cache)
-  if (!client && paramClientName) {
-    console.log(`[agentV2] executeSchedule: cache falhou → ILIKE Supabase para "${paramClientName}"`);
-    try {
-      const supabaseResults = await clientsStore.search(paramClientName);
-      console.log(`[agentV2] executeSchedule: Supabase retornou ${supabaseResults.length} resultado(s)`);
-      if (supabaseResults.length === 1) {
-        client = supabaseResults[0];
-        console.log(`[agentV2] executeSchedule: cliente resolvido via Supabase → id=${client.id}`);
-      } else if (supabaseResults.length > 1) {
-        const names = supabaseResults.slice(0, 5).map((c: any) => `${c.name} (ID:${c.id})`).join(", ");
-        return `Encontrei varios clientes com "${paramClientName}": ${names}. Qual deles?`;
-      }
-    } catch (err) {
-      console.error(`[agentV2] executeSchedule: ERRO Supabase search:`, err);
-    }
-  }
-
   if (!client) {
     const similar = allClients
       .filter(
         (c: any) =>
           paramClientName &&
-          normalizeStr(c.name).includes(normalizeStr(paramClientName.split(" ")[0]))
+          c.name.toLowerCase().includes(
+            paramClientName.toLowerCase().split(" ")[0]
+          )
       )
       .slice(0, 3)
       .map((c: any) => c.name)
@@ -636,14 +606,14 @@ async function executeSchedule(params: any): Promise<string> {
     return `CONFLITO:${emp.name} ja tem agendamento das ${conflictHour} as ${conflictEnd} (${conflict.clientName ?? "cliente"}). Para forcar mesmo assim, confirme explicitamente.`;
   }
 
-  // 7. Criar agendamento ── com try/catch para capturar erros reais do banco
-  const createPayload = {
+  // 7. Criar agendamento ──────────────────────────────────
+  const created = await appointmentsStore.create({
     clientName: client.name,
     clientId: client.id,
     employeeId: emp.id,
     startTime,
     endTime,
-    status: "scheduled" as const,
+    status: "scheduled",
     totalPrice: svc.price,
     notes: null,
     paymentStatus: null,
@@ -658,29 +628,10 @@ async function executeSchedule(params: any): Promise<string> {
         materialCostPercent: svc.materialCostPercent ?? 0,
       },
     ],
-  };
-  console.log(`[agentV2] executeSchedule: enviando para Supabase →`, JSON.stringify({
-    clientId: createPayload.clientId,
-    clientName: createPayload.clientName,
-    employeeId: createPayload.employeeId,
-    startTime: createPayload.startTime,
-    endTime: createPayload.endTime,
-    serviceId: createPayload.services[0].serviceId,
-  }));
-
-  let created: any;
-  try {
-    created = await appointmentsStore.create(createPayload);
-    console.log(`[agentV2] executeSchedule: SUCESSO → id=${created?.id}`);
-  } catch (err: any) {
-    console.error(`[agentV2] executeSchedule: ERRO ao persistir no banco:`, err);
-    const detail = err?.message ?? err?.details ?? err?.code ?? "erro desconhecido";
-    return `Erro ao criar agendamento no banco: ${detail}. O agendamento NÃO foi salvo. Verifique o console para detalhes.`;
-  }
+  });
 
   if (!created || !created.id) {
-    console.error(`[agentV2] executeSchedule: create retornou vazio/sem id`, created);
-    return `Erro ao criar agendamento: banco não retornou confirmação. O agendamento pode não ter sido salvo.`;
+    return `Erro ao criar agendamento no banco. Verifique os dados e tente novamente.`;
   }
 
   window.dispatchEvent(new Event("store_updated"));
@@ -735,13 +686,6 @@ INSTRUCOES DE ACAO — MUITO IMPORTANTE:
 - Se falta informacao (cliente, servico, horario), pergunte APENAS o que falta — NAO inclua bloco action nesse caso
 - Se o usuario pediu para agendar e voce tem TODOS os dados necessarios (cliente, servico, horario, data), INCLUA o bloco action imediatamente
 
-COMO USAR OS DADOS DE CLIENTES:
-- Os dados do sistema incluem linhas no formato: "ID:123 | Nome do Cliente | telefone | Ultimo servico: X em YYYY-MM-DD"
-- O numero apos "ID:" e o clientId — use ESSE numero exato no bloco action
-- NUNCA invente um clientId — sempre use o ID que aparece nos dados fornecidos
-- Se o cliente nao aparece nos dados, diga que nao encontrou e peca para confirmar o nome
-- Se aparecerem varios clientes com nome similar, liste-os e pergunte qual e o correto
-
 ACOES — inclua ao final da resposta APENAS quando necessario:
 \`\`\`action
 {"type":"agendar","params":{"clientId":123,"clientName":"Nome","serviceId":45,"employeeId":2,"date":"hoje","time":"14:00"}}
@@ -758,7 +702,9 @@ REGRAS ADICIONAIS:
 15. Se o usuario diz apenas um horario (ex: "as 14"), use a data de hoje
 16. Se o usuario diz um nome que e de profissional, NAO busque como cliente
 17. Quando o sistema retornar um conflito ou erro, informe o usuario de forma clara
-18. NUNCA diga "nao encontrei" se os dados do sistema mostram o cliente — leia os dados com atencao antes de responder
+18. NUNCA diga que agendou, cancelou, moveu ou concluiu algo antes do retorno real do sistema/banco
+19. Antes do retorno do sistema, use no maximo frases como "vou tentar", "vou verificar" ou "estou processando"
+20. Se voce nao conseguir gerar o bloco action, NAO confirme a operacao como concluida
 ${buildMemoryPrompt()}`;
 }
 
@@ -768,84 +714,50 @@ async function gatherData(msg: string): Promise<string> {
   const q = msg.toLowerCase();
   const parts: string[] = [getTodayData(), getEmployeesData(), getServicesData()];
 
-  // ── Estratégia de extração de nome do cliente ────────────────────────────
-  // Prioridade 1: padrão explícito "cliente X" ou "para o cliente X"
-  // Prioridade 2: padrão "procurar/buscar X"
-  // Prioridade 3: heurística por palavras (fallback)
-  // Em todos os casos: busca com NFD normalizado + ILIKE fallback
-
-  let searchTerm: string | null = null;
-
-  // Prioridade 1 — "cliente Eduardo", "para a cliente Soraia Marcela"
-  const clienteMatch = msg.match(
-    /(?:^|\s)(?:o\s+cliente|a\s+cliente|cliente)\s+([A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ\s]{1,49})(?=\s+(?:amanhã|amanha|hoje|às|as|para|com|no|na|$)|$)/i
+  // Extrair candidatos a nome de cliente da mensagem
+  const empsLower = new Set(
+    employeesStore
+      .list(true)
+      .flatMap((e: any) => e.name.toLowerCase().split(" "))
   );
-  if (clienteMatch?.[1]) {
-    searchTerm = clienteMatch[1].trim();
-    console.log(`[agentV2] gatherData: padrão "cliente X" → "${searchTerm}"`);
-  }
+  const svcsLower = new Set(
+    servicesStore
+      .list(true)
+      .flatMap((s: any) => s.name.toLowerCase().split(" "))
+  );
 
-  // Prioridade 2 — "procurar/buscar X", "procure por X", "quem é X"
-  if (!searchTerm) {
-    const buscaMatch = msg.match(
-      /(?:procure?(?:\s+por)?|buscar?|busque|encontre?|quem\s+[eé])\s+([A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ\s]{1,49})(?=[,.]|\s+(?:no\s+sistema|cadastrado|$)|$)/i
-    );
-    if (buscaMatch?.[1]) {
-      searchTerm = buscaMatch[1].trim();
-      console.log(`[agentV2] gatherData: padrão "buscar X" → "${searchTerm}"`);
-    }
-  }
+  const stopWords = new Set([
+    "quero", "agendar", "marcar", "cliente", "para", "preciso", "cancelar",
+    "mover", "agenda", "hoje", "amanha", "hora", "servico", "horario",
+    "consegue", "executar", "agendamento", "voce", "fazer", "nome", "tenho",
+    "qual", "quais", "pode", "como", "quanto", "tempo", "duracao",
+    "compreende", "corte", "escova", "tintura", "manicure", "pedicure",
+    "barba", "hidrata", "progressiva", "termica", "relaxamento", "botox",
+    "coloracao", "luzes", "alisamento", "massagem", "unhas", "masculino",
+    "feminino", "sim", "nao", "forcar", "confirma", "confirmar", "forca",
+    "mesmo", "assim", "deixa", "esquece", "cancelado", "mova", "mude",
+    "concluir", "fechar", "abrir", "buscar", "procurar",
+  ]);
 
-  // Prioridade 3 — heurística por palavras (mantida como fallback, mas com NFD)
-  if (!searchTerm) {
-    const empNames = new Set(
-      employeesStore.list(true).flatMap((e: any) => normalizeStr(e.name).split(" "))
-    );
-    const svcNames = new Set(
-      servicesStore.list(true).flatMap((s: any) => normalizeStr(s.name).split(" "))
-    );
-    const stopWords = new Set([
-      "que", "nao", "sim", "para", "com", "uma", "uns", "umas", "por",
-      "quero", "agendar", "marcar", "cliente", "preciso", "cancelar",
-      "mover", "agenda", "hoje", "amanha", "hora", "servico", "horario",
-      "consegue", "executar", "agendamento", "voce", "fazer", "nome",
-      "qual", "quais", "pode", "como", "quanto", "tempo", "duracao",
-      "confirma", "confirmar", "mesmo", "assim", "deixa", "esquece",
-      "concluir", "fechar", "abrir", "buscar", "procurar", "liste",
-      "listar", "ultimos", "ultimas", "sistema", "agora", "cadastrado",
-      "cadastrados", "tenho", "temos", "informacoes", "informacao",
-    ]);
+  const words = msg
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && /^[A-Za-zÀ-ÖØ-öø-ÿ]/.test(w));
+  const candidateNames = words.filter((w) => {
+    const wl = w.toLowerCase();
+    return !stopWords.has(wl) && !empsLower.has(wl) && !svcsLower.has(wl);
+  });
 
-    const words = msg
-      .split(/\s+/)
-      .filter((w) => w.length > 2 && /^[A-Za-zÀ-ÖØ-öø-ÿ]/.test(w));
-
-    const candidates = words.filter((w) => {
-      const wNorm = normalizeStr(w);
-      return !stopWords.has(wNorm) && !empNames.has(wNorm) && !svcNames.has(wNorm);
-    });
-
-    console.log(`[agentV2] gatherData: heurística candidateNames=`, candidates);
-
-    if (candidates.length > 0) {
-      searchTerm = candidates.join(" ");
-      console.log(`[agentV2] gatherData: heurística → "${searchTerm}"`);
-    }
-  }
-
-  // ── Executar busca ───────────────────────────────────────────────────────
-  if (searchTerm) {
-    console.log(`[agentV2] gatherData: buscando cliente com termo="${searchTerm}"`);
+  if (candidateNames.length > 0) {
+    const searchTerm = candidateNames.join(" ");
     parts.push(await getClientWithHistory(searchTerm));
   } else {
-    const all = await clientsStore.ensureLoaded();
-    console.log(`[agentV2] gatherData: sem termo de busca, cache=${all.length} clientes`);
+    const total = await clientsStore.count();
     parts.push(
-      `Total clientes cadastrados: ${all.length}. Use busca por nome para localizar clientes especificos.`
+      `Total clientes cadastrados: ${total}. Use busca por nome para localizar.`
     );
   }
 
-  // ── Data específica ──────────────────────────────────────────────────────
+  // Se menciona data especifica, buscar agendamentos dessa data
   const dateMatch = q.match(
     /\b(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|amanha|amanhã|segunda|terca|terça|quarta|quinta|sexta|sabado|sábado|domingo)\b/i
   );
@@ -857,6 +769,15 @@ async function gatherData(msg: string): Promise<string> {
 // ─── API ──────────────────────────────────────────────────
 
 const ENDPOINT = "https://models.github.ai/inference/chat/completions";
+const PROXY_ENDPOINT = "/api/llm";
+
+function isLikelyActionRequest(text: string): boolean {
+  return /\b(agendar|marcar|agenda|cancelar|desmarcar|reagendar|mover|remarcar|concluir|finalizar)\b/i.test(text);
+}
+
+function claimsActionSuccess(text: string): boolean {
+  return /\b(agendei|agendado com sucesso|marquei|cancelei|cancelado com sucesso|movi|reagendei|conclui|concluido com sucesso|feito)\b/i.test(text);
+}
 
 async function callLLM(
   system: string,
@@ -865,9 +786,6 @@ async function callLLM(
   data: string,
   config: AgentV2Config,
 ): Promise<string> {
-  if (!config.apiToken || config.apiToken === "proxy")
-    throw new Error("Token nao configurado.");
-
   const messages = [
     { role: "system", content: system },
     {
@@ -882,12 +800,24 @@ async function callLLM(
   const tmr = setTimeout(() => ctrl.abort(), 25_000);
 
   try {
-    const res = await fetch(ENDPOINT, {
+    const isLocalhost = typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname);
+    const useProxy = !isLocalhost;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+
+    if (useProxy) {
+      if (config.apiToken && config.apiToken !== "proxy") headers["x-github-token"] = config.apiToken;
+    } else {
+      if (!config.apiToken || config.apiToken === "proxy") {
+        throw new Error("Token nao configurado para ambiente local.");
+      }
+      headers.Authorization = `Bearer ${config.apiToken}`;
+    }
+
+    const res = await fetch(useProxy ? PROXY_ENDPOINT : ENDPOINT, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.apiToken}`,
-      },
+      headers,
       body: JSON.stringify({
         model: config.model ?? "openai/gpt-4o-mini",
         messages,
@@ -1114,6 +1044,12 @@ export async function handleMessageV2(
       text = `Erro ao processar acao: ${err instanceof Error ? err.message : "Desconhecido"}`;
       console.error("[AgentV2] Erro ao processar acao:", err);
     }
+  } else if (isLikelyActionRequest(msgTrimmed)) {
+    if (claimsActionSuccess(raw)) {
+      text = "Eu ainda nao confirmei essa operacao no banco. O modelo respondeu sem acionar a funcao corretamente, entao nada foi persistido. Tente repetir com cliente, servico, data e horario.";
+    } else {
+      text = raw.replace(/```[\s\S]*?```/g, "").trim() || "Nao consegui gerar a acao estruturada para executar no banco. Pode repetir o pedido?";
+    }
   }
 
   addToHistory("assistant", text);
@@ -1152,3 +1088,4 @@ export async function testAgentV2Connection(
     };
   }
 }
+
