@@ -4,11 +4,10 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useLocation } from "wouter";
 import {
-  MessageCircle, X, Send, Brain, Mic, ChevronDown,
-  Trash2, Zap,
+  X, Send, Brain, ChevronDown, Trash2
 } from "lucide-react";
-// Importando o novo motor que criamos na pasta lib
-import { executarAgente } from "@/lib/ai-agent";
+// Usando caminho relativo para evitar erro de resolução do Vercel
+import { executarAgente } from "../lib/ai-agent";
 
 // ─── Tipos ─────────────────────────────────────────────────
 interface ChatMessage {
@@ -49,7 +48,6 @@ export default function AgentChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
-  const [isListening, setIsListening] = useState(false);
   const [, setLocation] = useLocation();
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -57,7 +55,6 @@ export default function AgentChat() {
   const accent = getAccent();
   const salonName = getSalonName();
 
-  // Carregar histórico
   useEffect(() => {
     const saved = localStorage.getItem(MESSAGES_KEY);
     if (saved) {
@@ -72,12 +69,10 @@ export default function AgentChat() {
     }
   }, [salonName]);
 
-  // Auto-scroll
   useEffect(() => {
     if (isOpen) messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isOpen]);
 
-  // ── Enviar mensagem ──────────────────────────────────────
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || isTyping) return;
 
@@ -95,7 +90,6 @@ export default function AgentChat() {
     setIsTyping(true);
 
     try {
-      // Chamada para o novo cérebro na Groq
       const respostaIA = await executarAgente(text.trim());
 
       const agentMsg: ChatMessage = {
@@ -110,7 +104,7 @@ export default function AgentChat() {
       localStorage.setItem(MESSAGES_KEY, JSON.stringify(finalMessages));
     } catch (err) {
       setMessages(prev => [...prev, {
-        id: "err", role: "agent", content: "Erro na conexão. Verifique sua chave API.", timestamp: Date.now()
+        id: "err", role: "agent", content: "Erro na conexão. Verifique sua chave API no Vercel.", timestamp: Date.now()
       }]);
     } finally {
       setIsTyping(false);
@@ -135,7 +129,6 @@ export default function AgentChat() {
             border: `1px solid rgba(255,255,255,0.1)`,
           }}>
           
-          {/* Header */}
           <div className="flex items-center gap-3 px-4 py-3 border-b border-white/10"
             style={{ background: `linear-gradient(135deg, ${accent}20, transparent)` }}>
             <Brain className="w-5 h-5" style={{ color: accent }} />
@@ -151,7 +144,6 @@ export default function AgentChat() {
             </button>
           </div>
 
-          {/* Messages */}
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {messages.map(msg => (
               <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
@@ -165,7 +157,6 @@ export default function AgentChat() {
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Input */}
           <div className="p-3 bg-black/20">
             <div className="flex gap-2 mb-2 overflow-x-auto pb-1">
               {QUICK_ACTIONS.map(q => (
@@ -191,7 +182,6 @@ export default function AgentChat() {
         </div>
       )}
 
-      {/* Botão Flutuante (FAB) */}
       <button
         onClick={() => setIsOpen(!isOpen)}
         className="fixed z-[9999] flex items-center justify-center hover:scale-110 transition-transform"
