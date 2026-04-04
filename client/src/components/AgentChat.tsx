@@ -1,15 +1,14 @@
 /**
- * AgentChat.tsx — Interface do Agente IA v2
- * Usa agentV2 (LLM-first com tool calling) em vez do orquestrador antigo.
+ * AgentChat.tsx — Interface do Agente IA v2 Adaptada
  */
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useLocation } from "wouter";
 import {
   MessageCircle, X, Send, Brain, Mic, ChevronDown,
-  ThumbsUp, ThumbsDown, Trash2, Zap,
+  ThumbsUp, ThumbsDown, Trash2, Zap, Bot, User, Loader2
 } from "lucide-react";
-import { handleMessageV2, clearHistory, addFeedback } from "@/lib/agentV2";
-import { loadRules, removeRule } from "@/lib/agentMemory";
+import { executarAgente } from "@/lib/ai-agent";
+import { supabase } from "@/lib/supabase";
 
 // ─── Tipos ─────────────────────────────────────────────────
 
@@ -18,7 +17,7 @@ interface ChatMessage {
   role: "user" | "agent";
   content: string;
   timestamp: number;
-  userMessage?: string;   // para feedback
+  userMessage?: string;
   feedback?: "good" | "bad";
 }
 
@@ -73,8 +72,6 @@ export default function AgentChat() {
   const [isTyping, setIsTyping] = useState(false);
   const [hasNew, setHasNew] = useState(false);
   const [isListening, setIsListening] = useState(false);
-  const [showRules, setShowRules] = useState(false);
-  const [rules, setRules] = useState(() => loadRules());
   const [, setLocation] = useLocation();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -97,15 +94,17 @@ export default function AgentChat() {
       setMessages([welcome]);
       persistMessages([welcome]);
     }
-  }, []);
+  }, [salonName]);
 
   // Scroll para o final
   useEffect(() => {
     if (isOpen) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, 100);
       setTimeout(() => inputRef.current?.focus(), 150);
     }
-  }, [messages, isOpen]);
+  }, [messages, isOpen, isTyping]);
 
   // ── Enviar mensagem ──────────────────────────────────────
   const lastSentRef = useRef<number>(0);
@@ -113,8 +112,7 @@ export default function AgentChat() {
   const sendMessage = useCallback(async (text: string) => {
     const now = Date.now();
     if (!text.trim() || isTyping) return;
-    // Debounce: ignorar se mesma mensagem enviada nos últimos 2 segundos
-    if (now - lastSentRef.current < 2000) return;
+    if (now - lastSentRef.current < 1000) return;
     lastSentRef.current = now;
 
     const userMsg: ChatMessage = {
@@ -133,12 +131,36 @@ export default function AgentChat() {
     setIsTyping(true);
 
     try {
-      const response = await handleMessageV2(text.trim());
+      const respostaIA = await executarAgente(text.trim());
+
+      // Lógica de Ação do Sistema (Agendamento)
+      if (respostaIA.includes("[ACAO_SISTEMA:")) {
+        try {
+          const jsonString = respostaIA.match(/\[ACAO_SISTEMA: (.*?)\]/)?.[1];
+          if (jsonString) {
+            const { tipo, payload } = JSON.parse(jsonString);
+            if (tipo === "CRIAR_AGENDAMENTO") {
+              await supabase.from('appointments').insert([{
+                client_name: payload.cliente,
+                service: payload.servico,
+                employee_id: payload.profissional,
+                appointment_date: payload.data,
+                start_time: payload.hora,
+                status: 'pendente'
+              }]);
+            }
+          }
+        } catch (e) {
+          console.error("Erro ao processar comando da IA:", e);
+        }
+      }
+
+      const respostaLimpa = respostaIA.replace(/\[ACAO_SISTEMA: .*?\]/g, "").trim();
 
       const agentMsg: ChatMessage = {
-        id: response.messageId ?? `a_${Date.now()}`,
+        id: `a_${Date.now()}`,
         role: "agent",
-        content: response.text,
+        content: respostaLimpa,
         timestamp: Date.now(),
         userMessage: text.trim(),
       };
@@ -151,44 +173,25 @@ export default function AgentChat() {
 
       if (!isOpen) setHasNew(true);
 
-      if (response.navigateTo) {
-        setTimeout(() => setLocation(response.navigateTo!), 1000);
-      }
     } catch (err) {
       const errorMsg: ChatMessage = {
         id: `e_${Date.now()}`,
         role: "agent",
-        content: "Não consegui processar agora. Verifique seu token e tente novamente.",
+        content: "Não consegui processar agora. Verifique sua conexão e tente novamente.",
         timestamp: Date.now(),
       };
       setMessages(prev => [...prev, errorMsg]);
     } finally {
       setIsTyping(false);
     }
-  }, [isTyping, isOpen, setLocation]);
+  }, [isTyping, isOpen, messages]);
 
   const handleSend = useCallback(() => {
     sendMessage(input);
   }, [input, sendMessage]);
 
-  // ── Feedback 👍/👎 ───────────────────────────────────────
-  const handleFeedback = useCallback((msg: ChatMessage, rating: "good" | "bad") => {
-    if (!msg.userMessage) return;
-    addFeedback(msg.userMessage, msg.content, rating);
-    setMessages(prev =>
-      prev.map(m => m.id === msg.id ? { ...m, feedback: rating } : m)
-    );
-  }, []);
-
-  // ── Remover regra ────────────────────────────────────────
-  const handleRemoveRule = useCallback((id: string) => {
-    removeRule(id);
-    setRules(loadRules());
-  }, []);
-
   // ── Limpar conversa ──────────────────────────────────────
   const handleClear = useCallback(() => {
-    clearHistory();
     localStorage.removeItem(MESSAGES_KEY);
     const welcome: ChatMessage = {
       id: `welcome_${Date.now()}`,
@@ -208,7 +211,10 @@ export default function AgentChat() {
       return;
     }
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) return;
+    if (!SR) {
+      alert("Seu navegador não suporta reconhecimento de voz.");
+      return;
+    }
     const r = new SR();
     r.lang = "pt-BR";
     r.onstart = () => setIsListening(true);
@@ -235,7 +241,7 @@ export default function AgentChat() {
       {/* Chat Panel */}
       {isOpen && (
         <div
-          className="fixed z-[9999] flex flex-col overflow-hidden"
+          className="fixed z-[9999] flex flex-col overflow-hidden animate-in slide-in-from-bottom-4 duration-300"
           style={{
             bottom: 88, right: 16,
             width: "min(400px, calc(100vw - 32px))",
@@ -266,13 +272,6 @@ export default function AgentChat() {
               </div>
             </div>
             <button
-              onClick={() => setShowRules(r => !r)}
-              className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"
-              title="Regras aprendidas"
-            >
-              <Zap className="w-3.5 h-3.5" style={{ color: showRules ? accent : "rgba(255,255,255,0.3)" }} />
-            </button>
-            <button
               onClick={handleClear}
               className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"
               title="Limpar conversa"
@@ -284,100 +283,66 @@ export default function AgentChat() {
             </button>
           </div>
 
-          {/* Rules Panel */}
-          {showRules && (
-            <div className="mx-4 mt-3 mb-1 rounded-xl p-3 text-xs" style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)" }}>
-              <p className="text-white/60 font-semibold mb-2 flex items-center gap-1">
-                <Zap className="w-3 h-3" style={{ color: accent }} /> Regras aprendidas
-              </p>
-              {rules.length === 0
-                ? <p className="text-white/30">Nenhuma regra ainda. Diga ao agente: "Lembra que..."</p>
-                : rules.map(r => (
-                    <div key={r.id} className="flex items-start justify-between gap-2 mb-1">
-                      <p className="text-white/70 flex-1">• {r.raw}</p>
-                      <button onClick={() => handleRemoveRule(r.id)} className="text-white/20 hover:text-red-400 shrink-0">✕</button>
-                    </div>
-                  ))
-              }
-            </div>
-          )}
-
           {/* Messages */}
-          <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-            {messages.map(msg => (
-              <div
-                key={msg.id}
-                className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"}`}
-              >
+          <ScrollArea className="flex-1 px-4 py-3">
+            <div className="space-y-4">
+              {messages.map(msg => (
                 <div
-                  className="max-w-[88%] rounded-2xl px-3.5 py-2.5 text-sm"
-                  style={
-                    msg.role === "user"
-                      ? { background: accent, color: "white" }
-                      : {
-                          background: "rgba(255,255,255,0.06)",
-                          border: "1px solid rgba(255,255,255,0.09)",
-                          color: "rgba(255,255,255,0.88)",
-                        }
-                  }
+                  key={msg.id}
+                  className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"}`}
                 >
-                  {msg.content.split("\n").map((line, i) => (
-                    <p key={i} className={i > 0 ? "mt-1" : ""}>{line}</p>
-                  ))}
-                </div>
-                {/* Feedback buttons — apenas em mensagens do agente */}
-                {msg.role === "agent" && msg.userMessage && (
-                  <div className="flex gap-1 mt-1 ml-1">
-                    <button
-                      onClick={() => handleFeedback(msg, "good")}
-                      className="p-1 rounded-md transition-colors"
-                      style={{ background: msg.feedback === "good" ? "rgba(52,211,153,0.2)" : "transparent" }}
-                      title="Boa resposta"
-                    >
-                      <ThumbsUp className="w-3 h-3" style={{ color: msg.feedback === "good" ? "#34d399" : "rgba(255,255,255,0.2)" }} />
-                    </button>
-                    <button
-                      onClick={() => handleFeedback(msg, "bad")}
-                      className="p-1 rounded-md transition-colors"
-                      style={{ background: msg.feedback === "bad" ? "rgba(239,68,68,0.2)" : "transparent" }}
-                      title="Resposta ruim"
-                    >
-                      <ThumbsDown className="w-3 h-3" style={{ color: msg.feedback === "bad" ? "#ef4444" : "rgba(255,255,255,0.2)" }} />
-                    </button>
+                  <div className="flex items-center gap-1.5 mb-1 opacity-40 text-[9px] font-bold uppercase tracking-wider text-white">
+                    {msg.role === "user" ? <User className="w-2.5 h-2.5" /> : <Bot className="w-2.5 h-2.5" />}
+                    <span>{msg.role === "user" ? "Você" : "Assistente"}</span>
                   </div>
-                )}
-              </div>
-            ))}
+                  <div
+                    className={`px-4 py-2.5 rounded-2xl text-sm max-w-[85%] whitespace-pre-wrap break-words leading-relaxed shadow-sm ${
+                      msg.role === "user" ? "" : "border border-white/10"
+                    }`}
+                    style={
+                      msg.role === "user"
+                        ? { background: accent, color: "white" }
+                        : {
+                            background: "rgba(255,255,255,0.06)",
+                            color: "rgba(255,255,255,0.88)",
+                          }
+                    }
+                  >
+                    {msg.content}
+                  </div>
+                </div>
+              ))}
 
-            {isTyping && (
-              <div className="flex justify-start">
-                <div
-                  className="px-4 py-3 rounded-2xl"
-                  style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.09)" }}
-                >
-                  <div className="flex gap-1">
-                    {[0, 1, 2].map(i => (
-                      <div
-                        key={i}
-                        className="w-2 h-2 rounded-full animate-bounce"
-                        style={{ backgroundColor: accent, animationDelay: `${i * 150}ms` }}
-                      />
-                    ))}
+              {isTyping && (
+                <div className="flex justify-start">
+                  <div
+                    className="px-4 py-3 rounded-2xl border border-white/10"
+                    style={{ background: "rgba(255,255,255,0.06)" }}
+                  >
+                    <div className="flex gap-1.5">
+                      {[0, 1, 2].map(i => (
+                        <div
+                          key={i}
+                          className="w-1.5 h-1.5 rounded-full animate-bounce"
+                          style={{ backgroundColor: accent, animationDelay: `${i * 150}ms` }}
+                        />
+                      ))}
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+          </ScrollArea>
 
           {/* Quick Actions */}
-          <div className="px-4 py-2 flex gap-2 overflow-x-auto border-t border-white/5 shrink-0">
+          <div className="px-4 py-2 flex gap-2 overflow-x-auto border-t border-white/5 shrink-0 no-scrollbar">
             {QUICK_ACTIONS.map(a => (
               <button
                 key={a.label}
                 onClick={() => sendMessage(a.query)}
                 disabled={isTyping}
-                className="px-3 py-1.5 rounded-full text-[11px] whitespace-nowrap shrink-0 transition-opacity disabled:opacity-40"
+                className="px-3 py-1.5 rounded-full text-[11px] whitespace-nowrap shrink-0 transition-all hover:opacity-80 disabled:opacity-40"
                 style={{ background: `${accent}18`, color: accent, border: `1px solid ${accent}30` }}
               >
                 {a.label}
@@ -387,7 +352,7 @@ export default function AgentChat() {
 
           {/* Input */}
           <div className="p-3 shrink-0">
-            <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-xl px-3 py-2">
+            <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-xl px-3 py-2 focus-within:border-white/20 transition-colors">
               <button
                 onClick={toggleVoice}
                 className={`p-1.5 rounded-lg transition-colors ${isListening ? "bg-red-500/20" : "hover:bg-white/5"}`}
@@ -445,4 +410,4 @@ export default function AgentChat() {
       </button>
     </>
   );
-}
+                }
