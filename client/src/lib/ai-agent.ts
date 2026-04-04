@@ -1,51 +1,74 @@
 import { supabase } from "./supabase";
 
 /**
- * Função para buscar o contexto real do salão no banco de dados
+ * Mapeamento completo do banco de dados para o Agente.
+ * Ele agora enxerga TUDO antes de falar.
  */
-async function buscarContextoSalao(nomeCliente?: string) {
-  // 1. Busca Profissionais e Serviços em paralelo
-  const [profissionais, servicos] = await Promise.all([
-    supabase.from('employees').select('name, specialty, working_days'),
-    supabase.from('services').select('name, price, duration')
+async function capturarEstadoGeral(termoBusca?: string) {
+  const hoje = new Date().toISOString().split('T')[0];
+
+  // Busca em todas as tabelas principais simultaneamente
+  const [resServicos, resEquipe, resAgenda, resClientes] = await Promise.all([
+    supabase.from('services').select('*'),
+    supabase.from('employees').select('*'),
+    supabase.from('appointments').select('*').gte('appointment_date', hoje),
+    termoBusca ? supabase.from('clients').select('*').ilike('name', `%${termoBusca}%`) : { data: [] }
   ]);
 
-  // 2. Busca histórico se o nome do cliente for fornecido
-  let historicoStr = "Cliente novo ou sem histórico identificado.";
-  if (nomeCliente) {
-    const { data: h } = await supabase
+  // Se encontrar um cliente, busca o histórico de agendamentos dele
+  let historicoDestaque = "Nenhum histórico encontrado para este termo.";
+  if (resClientes.data && resClientes.data.length > 0) {
+    const cliente = resClientes.data[0];
+    const { data: ultimos } = await supabase
       .from('appointments')
-      .select('service, date')
-      .ilike('client_name', `%${nomeCliente}%`)
-      .order('date', { ascending: false })
-      .limit(1);
-    
-    if (h && h.length > 0) {
-      historicoStr = `Último serviço do(a) ${nomeCliente}: ${h[0].service} em ${h[0].date}.`;
+      .select('service, appointment_date, status')
+      .eq('client_name', cliente.name)
+      .order('appointment_date', { ascending: false })
+      .limit(3);
+
+    if (ultimos && ultimos.length > 0) {
+      historicoDestaque = `O cliente ${cliente.name} realizou recentemente: ${ultimos.map(u => `${u.service} em ${u.appointment_date} (${u.status})`).join('; ')}.`;
     }
   }
 
-  // 3. Formata os dados para a IA "ler"
-  const listaPro = profissionais.data?.map(p => `${p.name} (${p.specialty})`).join(", ");
-  const listaServ = servicos.data?.map(s => `${s.name} - R$${s.price}`).join(", ");
-
   return {
-    prompt: `
-      CONTEXTO ATUAL DO SALÃO:
-      - Profissionais Disponíveis: ${listaPro}
-      - Serviços Oferecidos: ${listaServ}
-      - Histórico do Cliente: ${historicoStr}
-      - Data de Hoje: ${new Date().toLocaleDateString('pt-BR')}
-    `
+    servicos: resServicos.data || [],
+    funcionarios: resEquipe.data || [],
+    agendaAtiva: resAgenda.data || [],
+    clientesEncontrados: resClientes.data || [],
+    historico: historicoDestaque,
+    dataHoje: hoje
   };
 }
 
 export async function executarAgente(mensagemUsuario: string) {
   try {
-    // Tenta extrair um nome da mensagem para buscar histórico (ajuste simples)
-    const possivelNome = mensagemUsuario.split(" ").find(w => w.length > 3 && w[0] === w[0].toUpperCase());
-    
-    const contexto = await buscarContextoSalao(possivelNome);
+    // Tenta detectar um nome próprio na mensagem (começa com letra maiúscula)
+    const palavras = mensagemUsuario.split(" ");
+    const nomeParaBusca = palavras.find(p => p.length > 2 && p[0] === p[0].toUpperCase());
+
+    const banco = await capturarEstadoGeral(nomeParaBusca);
+
+    const promptSistema = `
+      VOCÊ É O GERENTE SUPREMO DO SALÃO DOMÍNIO PRO.
+      Você tem acesso direto ao banco de dados e deve ser ultra-preciso.
+
+      --- DADOS REAIS DO SUPABASE ---
+      SERVIÇOS DISPONÍVEIS: ${JSON.stringify(banco.servicos)}
+      EQUIPE (FUNCIONÁRIOS): ${JSON.stringify(banco.funcionarios)}
+      AGENDA ATUAL (OCUPADA): ${JSON.stringify(banco.agendaAtiva)}
+      CLIENTES IDENTIFICADOS: ${JSON.stringify(banco.clientesEncontrados)}
+      HISTÓRICO RELEVANTE: ${banco.historico}
+      DATA ATUAL: ${banco.dataHoje}
+      -------------------------------
+
+      SUAS DIRETRIZES:
+      1. SUCESSO DO CLIENTE: Se o cliente tem histórico, sugira algo baseado no que ele já gosta.
+      2. PRECISÃO DE AGENDA: Antes de confirmar, olhe a "AGENDA ATUAL". Se o funcionário estiver ocupado naquela hora/data, NÃO agende. Avise e ofereça outro.
+      3. SERVIÇOS REAIS: Nunca invente um serviço ou preço. Use apenas o que está em "SERVIÇOS DISPONÍVEIS".
+      4. COMANDO DE AÇÃO: Quando o agendamento for definido (Nome, Serviço, Funcionário, Data e Hora), você DEVE obrigatoriamente terminar a resposta com:
+         [ACAO_SISTEMA: {"tipo": "CRIAR_AGENDAMENTO", "payload": {"cliente": "...", "servico": "...", "profissional": "...", "data": "YYYY-MM-DD", "hora": "HH:MM"}}]
+    `;
 
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -56,27 +79,18 @@ export async function executarAgente(mensagemUsuario: string) {
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
         messages: [
-          {
-            role: "system",
-            content: `Você é o Agente Pro do Salão Domínio Pro. Você tem controle total da gestão.
-            ${contexto.prompt}
-            
-            REGRAS DE OURO:
-            1. Use o histórico do cliente para sugerir serviços (ex: "Vi que você fez Mechas, quer retocar?").
-            2. Se o cliente pedir um serviço que não existe na lista acima, avise que não fazemos.
-            3. Se pedir um profissional que não está na lista, sugira os disponíveis.
-            4. Ao confirmar um agendamento, retorne no final: [AGENDAR: {"cliente": "...", "servico": "...", "profissional": "...", "data": "YYYY-MM-DD", "hora": "HH:MM"}]`
-          },
+          { role: "system", content: promptSistema },
           { role: "user", content: mensagemUsuario }
         ],
-        temperature: 0.6,
+        temperature: 0.3, // Baixa temperatura para ele ser um gerente sério e não inventar coisas
       }),
     });
 
     const data = await response.json();
     return data.choices[0].message.content;
+
   } catch (error) {
-    console.error("Erro no Agente:", error);
-    return "Desculpe Fernanda, tive um problema ao acessar o banco de dados agora.";
+    console.error("Erro no Agente Supremo:", error);
+    return "Erro crítico ao acessar as tabelas do salão. Verifique o console.";
   }
 }
