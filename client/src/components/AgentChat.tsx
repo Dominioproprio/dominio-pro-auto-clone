@@ -98,6 +98,7 @@ export default function AgentChat() {
   const inputRef       = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
   const lastSentRef    = useRef<number>(0);
+  const cooldownRef    = useRef<number>(0);
 
   const accent     = getAccent();
   const salonName  = getSalonName();
@@ -142,7 +143,11 @@ export default function AgentChat() {
     const agora = Date.now();
     const textoLimpo = text.trim();
     if (!textoLimpo || isTyping) return;
-    if (agora - lastSentRef.current < 800) return; // debounce
+    if (agora - lastSentRef.current < 1500) return; // debounce mais seguro
+    if (agora < cooldownRef.current) {
+      // ainda em cooldown — mostra aviso suave sem chamar a API
+      return;
+    }
     lastSentRef.current = agora;
 
     // Adiciona mensagem do usuário
@@ -200,6 +205,8 @@ export default function AgentChat() {
       });
 
       if (!isOpen) setHasNew(true);
+      // Cooldown de 3s após cada resposta para não disparar rajada na Groq
+      cooldownRef.current = Date.now() + 3000;
 
     } catch (err) {
       const errorMsg: ChatMessage = {
