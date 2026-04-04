@@ -7,6 +7,7 @@ import {
   MessageCircle, X, Send, Brain, Mic, ChevronDown,
   ThumbsUp, ThumbsDown, Trash2, Zap, Bot, User, Loader2
 } from "lucide-react";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { executarAgente } from "@/lib/ai-agent";
 import { supabase } from "@/lib/supabase";
 
@@ -410,4 +411,4 @@ export default function AgentChat() {
       </button>
     </>
   );
-                }
+                  }
