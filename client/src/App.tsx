@@ -22,19 +22,7 @@ import { useState, useEffect } from "react";
 import { getSession, getDefaultRoute } from "./lib/access";
 import ProfileSelector from "./components/ProfileSelector";
 import AgentChat from "./components/AgentChat";
-
 import { fetchAllData } from "./lib/store";
-
-// --- IMPORTAÇÃO DO AGENTE ---
-import { initAgentV2 } from "./lib/agentV2";
-
-function getAccent() {
-  try {
-    const s = localStorage.getItem("salon_config");
-    if (s) return JSON.parse(s).accentColor || "#ec4899";
-  } catch { /* ignore */ }
-  return "#ec4899";
-}
 
 function AppContent() {
   const [, setLocation] = useLocation();
@@ -42,50 +30,13 @@ function AppContent() {
 
   // ── CARREGAR DADOS DO SISTEMA AO INICIAR ──
   useEffect(() => {
-    // Tenta carregar todos os dados. Se falhar (ex: rede instável), o agente
-    // vai buscar diretamente no Supabase via ensureLoaded() quando precisar.
     fetchAllData().catch(err => {
-      console.warn("[App] fetchAllData falhou — agente usará busca direta:", err);
+      console.warn("[App] fetchAllData falhou:", err);
     });
   }, []);
 
-  // ── INICIALIZAÇÃO DO AGENTE IA v2 ──
-  useEffect(() => {
-    const setupIA = async () => {
-      let token = localStorage.getItem("github_token");
-
-      if (!token) {
-        token = window.prompt(
-          "Configure seu GitHub Token para ativar o Agente IA:\n" +
-          "Acesse: github.com/settings/tokens → Fine-grained → Models: Read"
-        );
-        if (token?.trim()) {
-          localStorage.setItem("github_token", token.trim());
-          token = token.trim();
-        }
-      }
-
-      if (!token) return;
-
-      try {
-        let salonName = "Domínio Pro";
-        try {
-          const cfg = localStorage.getItem("salon_config");
-          if (cfg) salonName = JSON.parse(cfg).salonName || salonName;
-        } catch {}
-
-        initAgentV2({
-          apiToken: token,
-          model: "openai/gpt-4o-mini",
-          salonName,
-          businessContext: `${salonName} — Sistema de gestão para salões e barbearias.`,
-        });
-      } catch (err) {
-        console.error("Erro ao inicializar Agente IA:", err);
-      }
-    };
-    setupIA();
-  }, []);
+  // O bloco de "INICIALIZAÇÃO DO AGENTE IA v2" foi removido 
+  // porque o novo agente funciona de forma independente no AgentChat.tsx
 
   return (
     <ThemeProvider>
@@ -122,6 +73,7 @@ function AppContent() {
             </Switch>
           </DominioLayout>
         </Switch>
+        {/* O AgentChat agora é autossuficiente e usará a Groq Key do Vercel */}
         <AgentChat />
       </TooltipProvider>
     </ThemeProvider>
@@ -137,3 +89,4 @@ function App() {
 }
 
 export default App;
+
