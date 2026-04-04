@@ -35,7 +35,6 @@ const SECONDARY_NAV = [
   { path: "/configuracoes",         label: "Configurações", icon: Settings    },
 ];
 
-// ─── Helpers ──────────────────────────────────────────────
 function loadBranding() {
   try {
     const s = localStorage.getItem("salon_config");
@@ -52,8 +51,7 @@ function loadBackground(): React.CSSProperties {
     const s = localStorage.getItem("salon_config");
     if (!s) return {};
     const c = JSON.parse(s);
-    if (c.bgType === "solid" && c.bgColor)
-      return { backgroundColor: c.bgColor };
+    if (c.bgType === "solid" && c.bgColor) return { backgroundColor: c.bgColor };
     if (c.bgType === "gradient" && c.bgGradientFrom && c.bgGradientTo)
       return { background: `linear-gradient(${c.bgGradientDir || "135deg"}, ${c.bgGradientFrom}, ${c.bgGradientTo})` };
     if (c.bgType === "image" && c.bgImageUrl)
@@ -62,7 +60,6 @@ function loadBackground(): React.CSSProperties {
   return {};
 }
 
-// ─── Paletas de tema ─────────────────────────────────────
 export const THEME_PALETTES = [
   { id: "rosa-neon", name: "Rosa Neon", accent: "#ec4899", bg: "#0d0d14", surface: "rgba(15,15,28,0.95)", card: "rgba(20,20,35,0.9)", border: "rgba(255,255,255,0.07)", dark: true, textColor: "#ffffff", textMuted: "rgba(255,255,255,0.45)" },
   { id: "roxo-galaxy", name: "Roxo Galaxy", accent: "#8b5cf6", bg: "#0c0818", surface: "rgba(14,10,28,0.95)", card: "rgba(20,15,40,0.9)", border: "rgba(255,255,255,0.07)", dark: true, textColor: "#ffffff", textMuted: "rgba(255,255,255,0.45)" },
@@ -100,29 +97,11 @@ function getAccent(): string {
 function BrandLogo({ size = 48 }: { size?: number }) {
   const branding = loadBranding();
   const accent = getAccent();
-  if (branding.logo) {
-    return (
-      <img src={branding.logo} alt="logo"
-        style={{ width: size, height: size, objectFit: "contain", borderRadius: size * 0.2 }} />
-    );
-  }
-  return (
-    <div style={{
-      width: size, height: size, borderRadius: size * 0.22,
-      background: `linear-gradient(135deg, ${accent}40, ${accent}15)`,
-      border: `1.5px solid ${accent}50`,
-      boxShadow: `0 4px 20px ${accent}30`,
-      display: "flex", alignItems: "center", justifyContent: "center",
-    }}>
-      <Scissors style={{ width: size * 0.42, height: size * 0.42, color: accent }} />
-    </div>
-  );
+  if (branding.logo) return <img src={branding.logo} alt="logo" style={{ width: size, height: size, objectFit: "contain", borderRadius: size * 0.2 }} />;
+  return <div style={{ width: size, height: size, borderRadius: size * 0.22, background: `linear-gradient(135deg, ${accent}40, ${accent}15)`, border: `1.5px solid ${accent}50`, boxShadow: `0 4px 20px ${accent}30`, display: "flex", alignItems: "center", justifyContent: "center" }}><Scissors style={{ width: size * 0.42, height: size * 0.42, color: accent }} /></div>;
 }
 
-export default function DominioLayout({ children, onNewAppt }: {
-  children: React.ReactNode;
-  onNewAppt?: () => void;
-}) {
+export default function DominioLayout({ children, onNewAppt }: { children: React.ReactNode; onNewAppt?: () => void; }) {
   const [location, setLocation] = useLocation();
   const { theme, toggleTheme, switchable } = useTheme();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -142,58 +121,80 @@ export default function DominioLayout({ children, onNewAppt }: {
   });
   const visibleSecondaryNav = SECONDARY_NAV.filter(n => {
     const key = n.path.replace("/", "").split("/")[0];
-    const keyMap: Record<string,string> = {
-      "funcionarios": "funcionarios", "servicos": "servicos",
-      "ferramentas-clientes": "ferramentas", "caixa": "caixa",
-      "relatorios": "relatorios", "historico": "historico",
-      "backup": "backup", "configuracoes": "configuracoes",
-    };
+    const keyMap: Record<string,string> = { "funcionarios": "funcionarios", "servicos": "servicos", "ferramentas-clientes": "ferramentas", "caixa": "caixa", "relatorios": "relatorios", "historico": "historico", "backup": "backup", "configuracoes": "configuracoes" };
     return menuVis[keyMap[key] ?? key] !== false;
   });
 
-  const handleLogout = () => {
-    clearSession();
-    window.location.reload();
-  };
-
   useEffect(() => {
-    const onUpdate = () => {
-      setBranding(loadBranding());
-      setBgStyle(loadBackground());
-      setAccent(getAccent());
-      setPalette(loadPalette());
-    };
+    const onUpdate = () => { setBranding(loadBranding()); setBgStyle(loadBackground()); setAccent(getAccent()); setPalette(loadPalette()); };
     window.addEventListener("salon_config_updated", onUpdate);
     return () => window.removeEventListener("salon_config_updated", onUpdate);
   }, []);
 
-  const navigate = (path: string) => {
-    setLocation(path);
-    setSidebarOpen(false);
-  };
-
-  const isActive = (path: string) =>
-    location === path || location.startsWith(path + "/");
+  const navigate = (path: string) => { setLocation(path); setSidebarOpen(false); };
+  const isActive = (path: string) => location === path || location.startsWith(path + "/");
 
   return (
     <div className="flex h-screen overflow-hidden" style={Object.keys(bgStyle).length > 0 ? bgStyle : { backgroundColor: palette.bg }}>
-
-      {sidebarOpen && (
-        <div className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm md:hidden"
-          onClick={() => setSidebarOpen(false)} />
-      )}
-
-      <aside className={cn(
-        "fixed md:relative z-50 flex flex-col h-full transition-transform duration-300 ease-out w-64",
-        sidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0",
-      )} style={{
-        background: palette.surface,
-        backdropFilter: "blur(32px)",
-        WebkitBackdropFilter: "blur(32px)",
-        borderRight: `1px solid ${palette.border}`,
-      }}>
-
+      {sidebarOpen && <div className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm md:hidden" onClick={() => setSidebarOpen(false)} />}
+      <aside className={cn("fixed md:relative z-50 flex flex-col h-full transition-transform duration-300 ease-out w-64", sidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0")} style={{ background: palette.surface, backdropFilter: "blur(32px)", borderRight: `1px solid ${palette.border}` }}>
         <div className="flex flex-col items-center pt-7 pb-5 px-4" style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
           <div className="relative mb-3"><BrandLogo size={72} /></div>
-          <p style={{ fontFamily: "'Space Gro
+          <p style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16, letterSpacing: "0.15em", textTransform: "uppercase", color: palette.textColor, textShadow: `0 0 20px ${accent}80`, textAlign: "center", lineHeight: 1.2 }}>{branding.name}</p>
+          <p style={{ fontSize: 10, color: palette.textMuted, letterSpacing: "0.25em", marginTop: 3 }}>PRO</p>
+          <button className="md:hidden absolute top-4 right-4 text-white/30" onClick={() => setSidebarOpen(false)}><X className="w-5 h-5" /></button>
+        </div>
+        <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-1">
+          <p style={{ fontSize: 10, color: palette.textMuted, letterSpacing: "0.2em", padding: "0 8px 8px" }}>PRINCIPAL</p>
+          {visiblePrimaryNav.map(({ path, label, icon: Icon }) => {
+            const active = isActive(path);
+            return (
+              <button key={path} onClick={() => navigate(path)} className={cn("w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200", active ? "" : "hover:bg-black/5")} style={active ? { background: `linear-gradient(135deg, ${accent}25, ${accent}10)`, border: `1px solid ${accent}30`, boxShadow: `0 2px 12px ${accent}20`, color: palette.textColor } : { color: palette.textMuted }}>
+                <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0", active ? "" : "bg-white/5")} style={active ? { background: `linear-gradient(135deg, ${accent}40, ${accent}20)` } : {}}><Icon className="w-4 h-4" style={active ? { color: accent } : {}} /></div>
+                <span className="flex-1 text-left">{label}</span>
+                {active && <ChevronRight className="w-3.5 h-3.5 opacity-50" style={{ color: accent }} />}
+              </button>
+            );
+          })}
+          <div className="pt-4">
+            <p style={{ fontSize: 10, color: palette.textMuted, letterSpacing: "0.2em", padding: "0 8px 8px" }}>GESTÃO</p>
+            {visibleSecondaryNav.map(({ path, label, icon: Icon }) => {
+              const active = isActive(path);
+              return (
+                <button key={path} onClick={() => navigate(path)} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-medium transition-all duration-200", active ? "" : "hover:bg-black/5")} style={active ? { background: `linear-gradient(135deg, ${accent}20, ${accent}08)`, border: `1px solid ${accent}25`, color: palette.textColor } : { color: palette.textMuted }}>
+                  <Icon className="w-3.5 h-3.5 flex-shrink-0" style={active ? { color: accent } : {}} />
+                  <span>{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+        <div className="px-3 py-3" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+          {switchable && <button onClick={toggleTheme} className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-white/30 hover:text-white/60 hover:bg-white/5">{theme === "dark" ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}<span>{theme === "dark" ? "Tema claro" : "Tema escuro"}</span></button>}
+          {accessEnabled && session && <button onClick={() => { clearSession(); window.location.reload(); }} className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs transition-all hover:bg-white/5 mb-1" style={{ color: palette.textMuted }}><LogOut className="w-3.5 h-3.5" /><span>Sair ({session.profileName})</span></button>}
+          <p style={{ fontSize: 10, color: palette.textMuted, textAlign: "center", marginTop: 8 }}>Domínio Pro v2.0</p>
+        </div>
+      </aside>
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <header className="flex-shrink-0 flex items-center gap-3 px-4 py-3" style={{ background: palette.surface.replace("0.95", "0.80"), backdropFilter: "blur(20px)", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+          <button onClick={() => setSidebarOpen(true)} className="md:hidden w-9 h-9 flex items-center justify-center rounded-xl text-white/50"><Menu className="w-5 h-5" /></button>
+          <div className="md:hidden flex items-center gap-2.5 flex-1"><BrandLogo size={28} /><span style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 13, letterSpacing: "0.15em", textTransform: "uppercase", color: palette.textColor, textShadow: `0 0 12px ${accent}80` }}>{branding.name}</span></div>
+          <div className="hidden md:flex items-center gap-2 flex-1">{(() => { const all = [...PRIMARY_NAV, ...SECONDARY_NAV]; const cur = all.find(n => isActive(n.path)); const Icon = cur?.icon; return cur ? <div className="flex items-center gap-2">{Icon && <Icon className="w-4 h-4" style={{ color: accent }} />}<span className="text-sm font-semibold" style={{ color: palette.textMuted }}>{cur.label}</span></div> : null; })()}</div>
+          <div className="flex items-center gap-2 ml-auto">{onNewAppt && <button onClick={onNewAppt} className="hidden md:flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-all" style={{ background: `linear-gradient(135deg, ${accent}, ${accent}cc)`, boxShadow: `0 4px 16px ${accent}40` }}><Plus className="w-4 h-4" />Novo Agendamento</button>}</div>
+        </header>
+        <main className="flex-1 overflow-auto pb-20 md:pb-0">{children}</main>
+        <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe" style={{ background: palette.surface, backdropFilter: "blur(32px)", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+          <div className="flex items-center justify-around px-2 py-2">
+            {visiblePrimaryNav.map(({ path, label, icon: Icon }) => {
+              const active = isActive(path);
+              return <button key={path} onClick={() => navigate(path)} className="flex flex-col items-center gap-1 px-4 py-1.5 rounded-xl transition-all" style={active ? { background: `${accent}18`, color: accent } : { color: palette.textMuted }}><div className="relative"><Icon className="w-5 h-5" style={{ color: active ? accent : "rgba(255,255,255,0.35)" }} />{active && <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full" style={{ backgroundColor: accent }} />}</div><span className="text-[10px] font-medium">{label}</span></button>;
+            })}
+            <button onClick={() => setSidebarOpen(true)} className="flex flex-col items-center gap-1 px-4 py-1.5 rounded-xl transition-all"><Menu className="w-5 h-5" style={{ color: "rgba(255,255,255,0.35)" }} /><span className="text-[10px] font-medium" style={{ color: "rgba(255,255,255,0.35)" }}>Menu</span></button>
+          </div>
+        </nav>
+        {onNewAppt && <button onClick={onNewAppt} className="md:hidden fixed bottom-20 right-5 z-30 w-14 h-14 rounded-2xl flex items-center justify-center" style={{ background: `linear-gradient(135deg, ${accent}, ${accent}cc)`, boxShadow: `0 8px 32px ${accent}60` }}><Plus className="w-6 h-6 text-white" /></button>}
+      </div>
+    </div>
+  );
+}
 
