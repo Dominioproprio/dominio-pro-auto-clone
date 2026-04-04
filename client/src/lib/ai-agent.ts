@@ -85,7 +85,7 @@ function formatarAgenda(agendamentos: Appointment[]): string {
   if (agendamentos.length === 0) return "Nenhum agendamento futuro cadastrado.";
 
   return agendamentos
-    .slice(0, 40) // evita prompt gigante
+    .slice(0, 20) // máx 20 itens para não estourar tokens
     .map(a => {
       const inicio = new Date(a.startTime);
       const data = inicio.toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit" });
@@ -281,33 +281,41 @@ export async function executarAgente(
     const ctx = await capturarContexto(nome);
     const systemPrompt = montarSystemPrompt(ctx);
 
-    // 2. Monta histórico (últimas 12 trocas para não estourar tokens)
+    // 2. Monta histórico (últimas 6 trocas — reduz tokens e chance de rate limit)
     const mensagensApi = [
-      ...historicoConversa.slice(-12),
+      ...historicoConversa.slice(-6),
       { role: "user" as const, content: mensagemUsuario },
     ];
 
-    // 3. Chama a API Groq
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${import.meta.env.VITE_GROQ_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...mensagensApi,
-        ],
-        temperature: 0.2,
-        max_tokens: 1024,
-      }),
+    const body = JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...mensagensApi,
+      ],
+      temperature: 0.2,
+      max_tokens: 768,
     });
 
-    if (!response.ok) {
-      const errBody = await response.text().catch(() => "");
-      console.error("[AI Agent] Groq HTTP error:", response.status, errBody);
+    // 3. Chama a API Groq com retry automático no 429
+    let response: Response | null = null;
+    for (let tentativa = 0; tentativa < 3; tentativa++) {
+      response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${import.meta.env.VITE_GROQ_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body,
+      });
+      if (response.status !== 429) break;
+      // Rate limit — espera antes de tentar novamente (2s, 4s)
+      await new Promise(r => setTimeout(r, 2000 * (tentativa + 1)));
+    }
+
+    if (!response || !response.ok) {
+      const errBody = await response?.text().catch(() => "") ?? "";
+      console.error("[AI Agent] Groq HTTP error:", response?.status, errBody);
       throw new Error(`Groq ${response.status}`);
     }
 
