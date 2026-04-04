@@ -21,22 +21,19 @@ import FerramentasClientesPage from "./pages/FerramentasClientesPage";
 import { useState, useEffect } from "react";
 import { getSession, getDefaultRoute } from "./lib/access";
 import ProfileSelector from "./components/ProfileSelector";
-import AgentChat from "./components/AgentChat";
+// CORREÇÃO AQUI: Importação com chaves caso não seja default export
+import { AgentChat } from "./components/AgentChat"; 
 import { fetchAllData } from "./lib/store";
 
 function AppContent() {
   const [, setLocation] = useLocation();
   const [session, setSession] = useState(getSession);
 
-  // ── CARREGAR DADOS DO SISTEMA AO INICIAR ──
   useEffect(() => {
     fetchAllData().catch(err => {
       console.warn("[App] fetchAllData falhou:", err);
     });
   }, []);
-
-  // O bloco de "INICIALIZAÇÃO DO AGENTE IA v2" foi removido 
-  // porque o novo agente funciona de forma independente no AgentChat.tsx
 
   return (
     <ThemeProvider>
@@ -73,7 +70,6 @@ function AppContent() {
             </Switch>
           </DominioLayout>
         </Switch>
-        {/* O AgentChat agora é autossuficiente e usará a Groq Key do Vercel */}
         <AgentChat />
       </TooltipProvider>
     </ThemeProvider>
@@ -89,4 +85,3 @@ function App() {
 }
 
 export default App;
-
