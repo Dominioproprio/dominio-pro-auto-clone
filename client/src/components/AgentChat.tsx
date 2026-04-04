@@ -1,86 +1,108 @@
 /**
- * AgentChat.tsx — Interface do Agente IA v2 Adaptada
+ * AgentChat.tsx — Interface do Agente IA
+ *
+ * - Passa histórico de conversa real para executarAgente()
+ * - Lida com ResultadoAgente tipado (agendamentoCriado, erro)
+ * - Lê accent e salonName do localStorage (compatível com salonConfig)
+ * - Persiste mensagens no localStorage (max 50)
+ * - Suporte a voz (Web Speech API)
  */
+
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useLocation } from "wouter";
 import {
-  MessageCircle, X, Send, Brain, Mic, ChevronDown,
-  ThumbsUp, ThumbsDown, Trash2, Zap, Bot, User, Loader2
+  Brain, X, Send, Mic, ChevronDown,
+  Trash2, Bot, User, Loader2, CalendarCheck,
 } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { executarAgente } from "@/lib/ai-agent";
-import { supabase } from "@/lib/supabase";
+import { executarAgente, type MensagemConversa } from "@/lib/ai-agent";
 
-// ─── Tipos ─────────────────────────────────────────────────
+// ─── Tipos ────────────────────────────────────────────────────────────────────
 
 interface ChatMessage {
   id: string;
   role: "user" | "agent";
   content: string;
   timestamp: number;
-  userMessage?: string;
-  feedback?: "good" | "bad";
+  tipo?: "success" | "error" | "info";
 }
 
-// ─── Helpers ───────────────────────────────────────────────
+// ─── Config do salão (lida do localStorage / salonConfig) ─────────────────────
 
 function getAccent(): string {
   try {
-    const s = localStorage.getItem("salon_config");
-    if (s) return JSON.parse(s).accentColor || "#ec4899";
+    const raw = localStorage.getItem("salon_config");
+    if (raw) return JSON.parse(raw).accentColor || "#ec4899";
   } catch {}
   return "#ec4899";
 }
 
 function getSalonName(): string {
   try {
-    const s = localStorage.getItem("salon_config");
-    if (s) return JSON.parse(s).salonName || "Domínio Pro";
+    const raw = localStorage.getItem("salon_config");
+    if (raw) return JSON.parse(raw).salonName || "Domínio Pro";
   } catch {}
   return "Domínio Pro";
 }
 
+// ─── Ações rápidas ────────────────────────────────────────────────────────────
+
 const QUICK_ACTIONS = [
-  { label: "Agenda hoje", query: "Quais agendamentos temos hoje?" },
-  { label: "Agendar", query: "Quero fazer um agendamento" },
-  { label: "Buscar cliente", query: "Preciso buscar um cliente" },
-  { label: "Faturamento", query: "Qual o faturamento de hoje?" },
+  { label: "📅 Agenda hoje",    query: "Quais agendamentos temos para hoje?" },
+  { label: "✂️ Novo agendamento", query: "Quero fazer um novo agendamento" },
+  { label: "🔍 Buscar cliente",  query: "Preciso buscar informações de um cliente" },
+  { label: "💰 Faturamento",     query: "Qual o faturamento de hoje?" },
+  { label: "👥 Equipe livre",    query: "Quais funcionários estão livres agora?" },
 ];
 
-const MESSAGES_KEY = "agentv2_chat_messages";
+// ─── Persistência de mensagens ────────────────────────────────────────────────
+
+const STORAGE_KEY = "dominio_pro_agent_chat";
 
 function loadMessages(): ChatMessage[] {
   try {
-    const raw = localStorage.getItem(MESSAGES_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY);
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
   }
 }
 
-function persistMessages(msgs: ChatMessage[]) {
+function saveMessages(msgs: ChatMessage[]) {
   try {
-    localStorage.setItem(MESSAGES_KEY, JSON.stringify(msgs.slice(-50)));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(msgs.slice(-50)));
   } catch {}
 }
 
-// ─── Componente Principal ──────────────────────────────────
+// ─── Converte ChatMessage[] em histórico para o agente ────────────────────────
+
+function toHistorico(msgs: ChatMessage[]): MensagemConversa[] {
+  return msgs
+    .filter(m => m.role === "user" || m.role === "agent")
+    .map(m => ({
+      role: m.role === "user" ? "user" : "assistant",
+      content: m.content,
+    }));
+}
+
+// ─── Componente Principal ─────────────────────────────────────────────────────
 
 export default function AgentChat() {
-  const [isOpen, setIsOpen] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState("");
-  const [isTyping, setIsTyping] = useState(false);
-  const [hasNew, setHasNew] = useState(false);
+  const [isOpen, setIsOpen]         = useState(false);
+  const [messages, setMessages]     = useState<ChatMessage[]>([]);
+  const [input, setInput]           = useState("");
+  const [isTyping, setIsTyping]     = useState(false);
+  const [hasNew, setHasNew]         = useState(false);
   const [isListening, setIsListening] = useState(false);
-  const [, setLocation] = useLocation();
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const recognitionRef = useRef<any>(null);
-  const accent = getAccent();
-  const salonName = getSalonName();
 
-  // Carregar mensagens salvas
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef       = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<any>(null);
+  const lastSentRef    = useRef<number>(0);
+
+  const accent     = getAccent();
+  const salonName  = getSalonName();
+
+  // ── Inicialização ──────────────────────────────────────
   useEffect(() => {
     const saved = loadMessages();
     if (saved.length > 0) {
@@ -89,86 +111,91 @@ export default function AgentChat() {
       const welcome: ChatMessage = {
         id: "welcome",
         role: "agent",
-        content: `Olá! Sou o Agente IA do ${salonName}. Posso ajudar com agendamentos, clientes, serviços e muito mais. Como posso ajudar?`,
+        content: `Olá! Sou o Assistente IA do ${salonName}. 🤖\nPosso ajudar com agendamentos, consultar a agenda, buscar clientes e responder dúvidas sobre os serviços. Como posso ajudar?`,
         timestamp: Date.now(),
+        tipo: "info",
       };
       setMessages([welcome]);
-      persistMessages([welcome]);
+      saveMessages([welcome]);
     }
   }, [salonName]);
 
-  // Scroll para o final
+  // ── Scroll automático ──────────────────────────────────
   useEffect(() => {
-    if (isOpen) {
-      setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-      }, 100);
-      setTimeout(() => inputRef.current?.focus(), 150);
-    }
+    if (!isOpen) return;
+    const timer = setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, 80);
+    return () => clearTimeout(timer);
   }, [messages, isOpen, isTyping]);
 
-  // ── Enviar mensagem ──────────────────────────────────────
-  const lastSentRef = useRef<number>(0);
+  // ── Foco no input ao abrir ─────────────────────────────
+  useEffect(() => {
+    if (isOpen) {
+      const timer = setTimeout(() => inputRef.current?.focus(), 200);
+      return () => clearTimeout(timer);
+    }
+  }, [isOpen]);
 
+  // ── Enviar mensagem ────────────────────────────────────
   const sendMessage = useCallback(async (text: string) => {
-    const now = Date.now();
-    if (!text.trim() || isTyping) return;
-    if (now - lastSentRef.current < 1000) return;
-    lastSentRef.current = now;
+    const agora = Date.now();
+    const textoLimpo = text.trim();
+    if (!textoLimpo || isTyping) return;
+    if (agora - lastSentRef.current < 800) return; // debounce
+    lastSentRef.current = agora;
 
+    // Adiciona mensagem do usuário
     const userMsg: ChatMessage = {
-      id: `u_${Date.now()}`,
+      id: `u_${agora}`,
       role: "user",
-      content: text.trim(),
-      timestamp: Date.now(),
+      content: textoLimpo,
+      timestamp: agora,
     };
 
     setMessages(prev => {
       const next = [...prev, userMsg];
-      persistMessages(next);
+      saveMessages(next);
       return next;
     });
     setInput("");
     setIsTyping(true);
 
     try {
-      const respostaIA = await executarAgente(text.trim());
+      // Obtém histórico atual para passar ao agente
+      const historico = toHistorico(messages);
 
-      // Lógica de Ação do Sistema (Agendamento)
-      if (respostaIA.includes("[ACAO_SISTEMA:")) {
-        try {
-          const jsonString = respostaIA.match(/\[ACAO_SISTEMA: (.*?)\]/)?.[1];
-          if (jsonString) {
-            const { tipo, payload } = JSON.parse(jsonString);
-            if (tipo === "CRIAR_AGENDAMENTO") {
-              await supabase.from('appointments').insert([{
-                client_name: payload.cliente,
-                service: payload.servico,
-                employee_id: payload.profissional,
-                appointment_date: payload.data,
-                start_time: payload.hora,
-                status: 'pendente'
-              }]);
-            }
-          }
-        } catch (e) {
-          console.error("Erro ao processar comando da IA:", e);
-        }
-      }
+      const resultado = await executarAgente(textoLimpo, historico);
 
-      const respostaLimpa = respostaIA.replace(/\[ACAO_SISTEMA: .*?\]/g, "").trim();
-
+      // Mensagem do agente
       const agentMsg: ChatMessage = {
         id: `a_${Date.now()}`,
         role: "agent",
-        content: respostaLimpa,
+        content: resultado.texto,
         timestamp: Date.now(),
-        userMessage: text.trim(),
+        tipo: resultado.erro ? "error" : resultado.agendamentoCriado ? "success" : undefined,
       };
 
+      // Se agendamento foi criado, adiciona notificação inline
+      const extras: ChatMessage[] = [];
+      if (resultado.agendamentoCriado) {
+        const appt = resultado.agendamentoCriado;
+        const dataFormatada = new Date(appt.startTime).toLocaleString("pt-BR", {
+          weekday: "long", day: "2-digit", month: "long",
+          hour: "2-digit", minute: "2-digit",
+        });
+        extras.push({
+          id: `sys_${Date.now()}`,
+          role: "agent",
+          content: `✅ Agendamento #${appt.id} salvo com sucesso para ${dataFormatada}.`,
+          timestamp: Date.now() + 1,
+          tipo: "success",
+        });
+      }
+
       setMessages(prev => {
-        const next = [...prev, agentMsg];
-        persistMessages(next);
+        const next = [...prev, agentMsg, ...extras];
+        saveMessages(next);
         return next;
       });
 
@@ -178,33 +205,37 @@ export default function AgentChat() {
       const errorMsg: ChatMessage = {
         id: `e_${Date.now()}`,
         role: "agent",
-        content: "Não consegui processar agora. Verifique sua conexão e tente novamente.",
+        content: "❌ Não consegui processar sua mensagem. Verifique a conexão e tente novamente.",
         timestamp: Date.now(),
+        tipo: "error",
       };
-      setMessages(prev => [...prev, errorMsg]);
+      setMessages(prev => {
+        const next = [...prev, errorMsg];
+        saveMessages(next);
+        return next;
+      });
     } finally {
       setIsTyping(false);
     }
   }, [isTyping, isOpen, messages]);
 
-  const handleSend = useCallback(() => {
-    sendMessage(input);
-  }, [input, sendMessage]);
+  const handleSend = useCallback(() => sendMessage(input), [input, sendMessage]);
 
-  // ── Limpar conversa ──────────────────────────────────────
+  // ── Limpar conversa ────────────────────────────────────
   const handleClear = useCallback(() => {
-    localStorage.removeItem(MESSAGES_KEY);
+    localStorage.removeItem(STORAGE_KEY);
     const welcome: ChatMessage = {
       id: `welcome_${Date.now()}`,
       role: "agent",
-      content: `Conversa reiniciada! Como posso ajudar?`,
+      content: "Conversa reiniciada! Como posso ajudar?",
       timestamp: Date.now(),
+      tipo: "info",
     };
     setMessages([welcome]);
-    persistMessages([welcome]);
+    saveMessages([welcome]);
   }, []);
 
-  // ── Voice Input ──────────────────────────────────────────
+  // ── Reconhecimento de voz ──────────────────────────────
   const toggleVoice = useCallback(() => {
     if (isListening) {
       recognitionRef.current?.stop();
@@ -218,16 +249,17 @@ export default function AgentChat() {
     }
     const r = new SR();
     r.lang = "pt-BR";
-    r.onstart = () => setIsListening(true);
+    r.continuous = false;
+    r.interimResults = false;
+    r.onstart  = () => setIsListening(true);
+    r.onerror  = () => setIsListening(false);
+    r.onend    = () => setIsListening(false);
     r.onresult = (e: any) => {
-      const t = e.results[e.results.length - 1][0].transcript;
-      setInput(t);
-      if (e.results[e.results.length - 1].isFinal) {
-        setIsListening(false);
-        sendMessage(t);
-      }
+      const transcript = e.results[e.results.length - 1][0].transcript;
+      setInput(transcript);
+      setIsListening(false);
+      sendMessage(transcript);
     };
-    r.onerror = () => setIsListening(false);
     recognitionRef.current = r;
     r.start();
   }, [isListening, sendMessage]);
@@ -237,54 +269,73 @@ export default function AgentChat() {
     setHasNew(false);
   }, []);
 
+  // ── Cor da bolha por tipo ──────────────────────────────
+  function getBubbleStyle(msg: ChatMessage): React.CSSProperties {
+    if (msg.role === "user") {
+      return { background: accent, color: "white" };
+    }
+    if (msg.tipo === "success") {
+      return { background: "rgba(16,185,129,0.15)", color: "rgba(255,255,255,0.9)", border: "1px solid rgba(16,185,129,0.3)" };
+    }
+    if (msg.tipo === "error") {
+      return { background: "rgba(239,68,68,0.12)", color: "rgba(255,255,255,0.85)", border: "1px solid rgba(239,68,68,0.3)" };
+    }
+    return { background: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.88)", border: "1px solid rgba(255,255,255,0.1)" };
+  }
+
+  // ─── Render ──────────────────────────────────────────────────────────────────
+
   return (
     <>
-      {/* Chat Panel */}
+      {/* ── Painel do chat ────────────────────────────── */}
       {isOpen && (
         <div
           className="fixed z-[9999] flex flex-col overflow-hidden animate-in slide-in-from-bottom-4 duration-300"
           style={{
             bottom: 88, right: 16,
-            width: "min(400px, calc(100vw - 32px))",
-            height: "min(560px, calc(100vh - 110px))",
+            width: "min(420px, calc(100vw - 32px))",
+            height: "min(600px, calc(100vh - 110px))",
             borderRadius: 20,
-            background: "rgba(10, 10, 20, 0.97)",
+            background: "rgba(8, 8, 18, 0.98)",
             backdropFilter: "blur(40px)",
-            border: `1px solid rgba(255,255,255,0.1)`,
-            boxShadow: `0 25px 60px rgba(0,0,0,0.6), 0 0 40px ${accent}18`,
+            border: "1px solid rgba(255,255,255,0.08)",
+            boxShadow: `0 30px 70px rgba(0,0,0,0.7), 0 0 50px ${accent}12`,
           }}
         >
           {/* Header */}
           <div
-            className="flex items-center gap-3 px-4 py-3 shrink-0 border-b border-white/10"
-            style={{ background: `linear-gradient(135deg, ${accent}15, transparent)` }}
+            className="flex items-center gap-3 px-4 py-3 shrink-0 border-b border-white/[0.07]"
+            style={{ background: `linear-gradient(135deg, ${accent}12, transparent)` }}
           >
             <div
               className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
-              style={{ background: `${accent}25`, border: `1px solid ${accent}50` }}
+              style={{ background: `${accent}20`, border: `1px solid ${accent}40` }}
             >
               <Brain className="w-4 h-4" style={{ color: accent }} />
             </div>
-            <div className="flex-1">
-              <p className="text-sm font-semibold text-white/90">Agente IA</p>
-              <div className="flex items-center gap-1">
-                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                <p className="text-[10px] text-white/40">Online — {salonName}</p>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-white/90 truncate">Agente IA</p>
+              <div className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                <p className="text-[10px] text-white/40 truncate">{salonName}</p>
               </div>
             </div>
             <button
               onClick={handleClear}
-              className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"
+              className="p-1.5 rounded-lg hover:bg-white/10 transition-colors shrink-0"
               title="Limpar conversa"
             >
-              <Trash2 className="w-3.5 h-3.5 text-white/30 hover:text-white/60" />
+              <Trash2 className="w-3.5 h-3.5 text-white/25 hover:text-white/60 transition-colors" />
             </button>
-            <button onClick={toggleChat} className="p-1.5 rounded-lg hover:bg-white/10">
+            <button
+              onClick={toggleChat}
+              className="p-1.5 rounded-lg hover:bg-white/10 transition-colors shrink-0"
+            >
               <ChevronDown className="w-4 h-4 text-white/40" />
             </button>
           </div>
 
-          {/* Messages */}
+          {/* Mensagens */}
           <ScrollArea className="flex-1 px-4 py-3">
             <div className="space-y-4">
               {messages.map(msg => (
@@ -292,35 +343,40 @@ export default function AgentChat() {
                   key={msg.id}
                   className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"}`}
                 >
-                  <div className="flex items-center gap-1.5 mb-1 opacity-40 text-[9px] font-bold uppercase tracking-wider text-white">
-                    {msg.role === "user" ? <User className="w-2.5 h-2.5" /> : <Bot className="w-2.5 h-2.5" />}
-                    <span>{msg.role === "user" ? "Você" : "Assistente"}</span>
-                  </div>
-                  <div
-                    className={`px-4 py-2.5 rounded-2xl text-sm max-w-[85%] whitespace-pre-wrap break-words leading-relaxed shadow-sm ${
-                      msg.role === "user" ? "" : "border border-white/10"
-                    }`}
-                    style={
-                      msg.role === "user"
-                        ? { background: accent, color: "white" }
-                        : {
-                            background: "rgba(255,255,255,0.06)",
-                            color: "rgba(255,255,255,0.88)",
-                          }
+                  {/* Rótulo */}
+                  <div className="flex items-center gap-1 mb-1 opacity-35">
+                    {msg.role === "user"
+                      ? <User className="w-2.5 h-2.5 text-white" />
+                      : msg.tipo === "success"
+                        ? <CalendarCheck className="w-2.5 h-2.5 text-emerald-400" />
+                        : <Bot className="w-2.5 h-2.5 text-white" />
                     }
+                    <span className="text-[9px] font-bold uppercase tracking-wider text-white">
+                      {msg.role === "user" ? "Você" : "Assistente"}
+                    </span>
+                    <span className="text-[9px] text-white/30 ml-0.5">
+                      {new Date(msg.timestamp).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  </div>
+
+                  {/* Bolha */}
+                  <div
+                    className="px-4 py-2.5 rounded-2xl text-sm max-w-[87%] whitespace-pre-wrap break-words leading-relaxed shadow-sm"
+                    style={getBubbleStyle(msg)}
                   >
                     {msg.content}
                   </div>
                 </div>
               ))}
 
+              {/* Indicador de digitação */}
               {isTyping && (
-                <div className="flex justify-start">
+                <div className="flex items-start gap-2">
                   <div
-                    className="px-4 py-3 rounded-2xl border border-white/10"
-                    style={{ background: "rgba(255,255,255,0.06)" }}
+                    className="px-4 py-3 rounded-2xl"
+                    style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.08)" }}
                   >
-                    <div className="flex gap-1.5">
+                    <div className="flex gap-1.5 items-center">
                       {[0, 1, 2].map(i => (
                         <div
                           key={i}
@@ -328,23 +384,32 @@ export default function AgentChat() {
                           style={{ backgroundColor: accent, animationDelay: `${i * 150}ms` }}
                         />
                       ))}
+                      <span className="text-[10px] text-white/30 ml-1">pensando…</span>
                     </div>
                   </div>
                 </div>
               )}
+
               <div ref={messagesEndRef} />
             </div>
           </ScrollArea>
 
-          {/* Quick Actions */}
-          <div className="px-4 py-2 flex gap-2 overflow-x-auto border-t border-white/5 shrink-0 no-scrollbar">
+          {/* Ações rápidas */}
+          <div
+            className="px-3 py-2 flex gap-1.5 overflow-x-auto border-t shrink-0"
+            style={{ borderColor: "rgba(255,255,255,0.05)" }}
+          >
             {QUICK_ACTIONS.map(a => (
               <button
                 key={a.label}
                 onClick={() => sendMessage(a.query)}
                 disabled={isTyping}
-                className="px-3 py-1.5 rounded-full text-[11px] whitespace-nowrap shrink-0 transition-all hover:opacity-80 disabled:opacity-40"
-                style={{ background: `${accent}18`, color: accent, border: `1px solid ${accent}30` }}
+                className="px-3 py-1.5 rounded-full text-[11px] whitespace-nowrap shrink-0 transition-all hover:opacity-90 active:scale-95 disabled:opacity-30"
+                style={{
+                  background: `${accent}14`,
+                  color: accent,
+                  border: `1px solid ${accent}28`,
+                }}
               >
                 {a.label}
               </button>
@@ -353,62 +418,87 @@ export default function AgentChat() {
 
           {/* Input */}
           <div className="p-3 shrink-0">
-            <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-xl px-3 py-2 focus-within:border-white/20 transition-colors">
+            <div
+              className="flex items-center gap-2 rounded-xl px-3 py-2 transition-all"
+              style={{
+                background: "rgba(255,255,255,0.04)",
+                border: `1px solid rgba(255,255,255,0.09)`,
+              }}
+            >
               <button
                 onClick={toggleVoice}
-                className={`p-1.5 rounded-lg transition-colors ${isListening ? "bg-red-500/20" : "hover:bg-white/5"}`}
+                className={`p-1.5 rounded-lg transition-colors shrink-0 ${
+                  isListening ? "bg-red-500/20" : "hover:bg-white/5"
+                }`}
+                title={isListening ? "Parar gravação" : "Falar"}
               >
-                <Mic className={`w-4 h-4 ${isListening ? "text-red-400 animate-pulse" : "text-white/30"}`} />
+                <Mic className={`w-4 h-4 transition-colors ${
+                  isListening ? "text-red-400 animate-pulse" : "text-white/25"
+                }`} />
               </button>
+
               <input
                 ref={inputRef}
                 value={input}
                 onChange={e => setInput(e.target.value)}
-                onKeyDown={e => e.key === "Enter" && !e.shiftKey && handleSend()}
+                onKeyDown={e => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
                 placeholder="Pergunte algo..."
                 disabled={isTyping}
-                className="flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/20 disabled:opacity-50"
+                className="flex-1 bg-transparent text-sm text-white/90 outline-none placeholder:text-white/20 disabled:opacity-40 min-w-0"
               />
+
               <button
                 onClick={handleSend}
                 disabled={!input.trim() || isTyping}
-                className="p-1.5 rounded-lg transition-all disabled:opacity-20"
-                style={{ background: input.trim() && !isTyping ? accent : "transparent" }}
+                className="p-1.5 rounded-lg transition-all shrink-0 disabled:opacity-20 active:scale-95"
+                style={{
+                  background: input.trim() && !isTyping ? accent : "transparent",
+                }}
+                title="Enviar"
               >
-                <Send className="w-3.5 h-3.5 text-white" />
+                {isTyping
+                  ? <Loader2 className="w-3.5 h-3.5 text-white animate-spin" />
+                  : <Send className="w-3.5 h-3.5 text-white" />
+                }
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* FAB */}
+      {/* ── FAB ───────────────────────────────────────── */}
       <button
         onClick={toggleChat}
-        className="fixed z-[9999] flex items-center justify-center transition-all hover:scale-105 active:scale-95"
+        className="fixed z-[9999] flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-95"
         style={{
           bottom: 20, right: 16,
           width: 56, height: 56,
           borderRadius: 18,
-          background: isOpen ? "rgba(255,255,255,0.1)" : accent,
-          boxShadow: isOpen ? "none" : `0 8px 32px ${accent}50`,
+          background: isOpen ? "rgba(255,255,255,0.08)" : accent,
+          boxShadow: isOpen ? "none" : `0 8px 32px ${accent}55, 0 2px 8px rgba(0,0,0,0.3)`,
+          border: isOpen ? "1px solid rgba(255,255,255,0.1)" : "none",
         }}
+        aria-label={isOpen ? "Fechar agente" : "Abrir agente IA"}
       >
-        {isOpen
-          ? <X className="w-5 h-5 text-white/70" />
-          : (
-            <div className="relative">
-              <Brain className="w-6 h-6 text-white" />
-              {hasNew && (
-                <div
-                  className="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-black"
-                  style={{ background: "#ef4444" }}
-                />
-              )}
-            </div>
-          )
-        }
+        {isOpen ? (
+          <X className="w-5 h-5 text-white/70" />
+        ) : (
+          <div className="relative">
+            <Brain className="w-6 h-6 text-white" />
+            {hasNew && (
+              <div
+                className="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2"
+                style={{ background: "#ef4444", borderColor: "#0a0a12" }}
+              />
+            )}
+          </div>
+        )}
       </button>
     </>
   );
-                  }
+}
