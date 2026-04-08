@@ -1,88 +1,376 @@
-01:36:20.003 
-Running build in Washington, D.C., USA (East) – iad1
-01:36:20.004 
-Build machine configuration: 2 cores, 8 GB
-01:36:20.122 
-Cloning github.com/Dominioproprio/dominio-pro-auto-clone (Branch: main, Commit: 4932b28)
-01:36:20.401 
-Cloning completed: 279.000ms
-01:36:20.925 
-Restored build cache from previous deployment (4xj2wtCY3bb37cjJNbpxmLHVHYLv)
-01:36:21.274 
-Running "vercel build"
-01:36:21.862 
-Vercel CLI 50.38.2
-01:36:22.436 
-Running "install" command: `npm install --legacy-peer-deps`...
-01:36:25.065 
-01:36:25.065 
-up to date, audited 661 packages in 2s
-01:36:25.065 
-01:36:25.066 
-167 packages are looking for funding
-01:36:25.066 
-  run `npm fund` for details
-01:36:25.085 
-01:36:25.086 
-13 vulnerabilities (3 moderate, 10 high)
-01:36:25.086 
-01:36:25.086 
-To address issues that do not require attention, run:
-01:36:25.087 
-  npm audit fix
-01:36:25.087 
-01:36:25.087 
-To address all issues possible (including breaking changes), run:
-01:36:25.087 
-  npm audit fix --force
-01:36:25.087 
-01:36:25.088 
-Some issues need review, and may require choosing
-01:36:25.088 
-a different dependency.
-01:36:25.088 
-01:36:25.088 
-Run `npm audit` for details.
-01:36:25.317 
-01:36:25.317 
-> dominio-pro@2.0.0 build
-01:36:25.318 
-> vite build && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist
-01:36:25.318 
-01:36:25.683 
-vite v7.3.1 building client environment for production...
-01:36:25.770 
-transforming...
-01:36:30.390 
-✓ 3316 modules transformed.
-01:36:30.395 
-✗ Build failed in 4.68s
-01:36:30.396 
-error during build:
-01:36:30.396 
-client/src/components/AgentChat.tsx (8:9): "executarAgente" is not exported by "client/src/lib/ai-agent.ts", imported by "client/src/components/AgentChat.tsx".
-01:36:30.396 
-file: /vercel/path0/client/src/components/AgentChat.tsx:8:9
-01:36:30.396 
-01:36:30.397 
-6: import { Input } from "@/components/ui/input";
-01:36:30.397 
-7: import { ScrollArea } from "@/components/ui/scroll-area";
-01:36:30.397 
-8: import { executarAgente } from "@/lib/ai-agent";
-01:36:30.397 
-            ^
-01:36:30.398 
-9: import { supabase } from "@/lib/supabase";
-01:36:30.398 
-01:36:30.398 
-    at getRollupError (file:///vercel/path0/node_modules/rollup/dist/es/shared/parseAst.js:402:41)
-01:36:30.398 
-    at error (file:///vercel/path0/node_modules/rollup/dist/es/shared/parseAst.js:398:42)
-01:36:30.398 
-    at Module.error (file:///vercel/path0/node_modules/rollup/dist/es/shared/node-entry.js:17040:16)
-01:36:30.398 
-    at Module.traceVariable (file:///vercel/path0/node_modules/rollup/dist/es/shared/node-entry.js:17452:29)
-01:36:30.399 
-    at ModuleScope.findVariable (file:///vercel/path0/node_modules/rollup/dist/es/shared/node-entry.js:15070:39)
-Deployment Summary
+/**
+ * ai-agent.ts — Motor do Agente IA do Domínio Pro
+ *
+ * - Usa Groq (llama-3.3-70b-versatile) via VITE_GROQ_API_KEY
+ * - Lê dados reais do Supabase via stores do app (cache + fallback direto)
+ * - Detecta nomes de clientes com stopwords e normalização NFD
+ * - Passa histórico de conversa para o modelo (multi-turn real)
+ * - Cria agendamentos usando appointmentsStore.create() com schema correto
+ * - Retorna erros tipados para o chat exibir corretamente
+ */
+
+import { supabase } from "./supabase";
+import {
+  servicesStore,
+  employeesStore,
+  clientsStore,
+  appointmentsStore,
+  type Appointment,
+  type AppointmentService,
+} from "./store";
+
+// ─── Tipos exportados ─────────────────────────────────────────────────────────
+
+export interface MensagemConversa {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ResultadoAgente {
+  texto: string;             // Resposta limpa para exibir ao usuário
+  agendamentoCriado?: Appointment; // Preenchido se um agendamento foi persistido
+  erro?: string;             // Mensagem de erro amigável se algo falhou
+}
+
+// ─── Stopwords — palavras que NÃO são nomes de clientes ──────────────────────
+
+const STOPWORDS = new Set([
+  // Verbos e expressões comuns
+  "quero","qual","quais","como","quando","onde","porque","para","fazer",
+  "buscar","agendar","cancelar","remarcar","confirmar","verificar","checar",
+  "preciso","gostaria","poderia","pode","consigo","tenho","temos","tem",
+  // Pronomes e artigos
+  "voce","você","minha","meu","meus","minhas","uma","uns","umas","esse",
+  "essa","este","esta","isso","aquilo","aquele","aquela","dele","dela",
+  // Substantivos que aparecem no início de frases
+  "cliente","clientes","servico","serviço","serviços","agenda","agendamento",
+  "agendamentos","horario","horário","horarios","funcionario","funcionários",
+  "hoje","amanha","semana","faturamento","caixa","relatorio","relatório",
+  // Advérbios e preposições
+  "agora","depois","antes","durante","junto","mais","menos","muito","pouco",
+  "favor","obrigado","obrigada","boa","bom","ola","olá",
+]);
+
+// ─── Normalização de texto ────────────────────────────────────────────────────
+
+function normalizar(s: string): string {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+}
+
+// ─── Detecta possível nome próprio na mensagem ────────────────────────────────
+
+function detectarNomeNaMensagem(msg: string): string | undefined {
+  // Remove pontuação e divide em tokens
+  const tokens = msg.replace(/[^\w\sÀ-ú]/g, " ").split(/\s+/);
+
+  for (const token of tokens) {
+    if (token.length < 3) continue;
+
+    const primeiraLetra = token[0];
+    const ehMaiuscula =
+      primeiraLetra === primeiraLetra.toUpperCase() &&
+      primeiraLetra !== primeiraLetra.toLowerCase(); // filtra dígitos
+
+    if (!ehMaiuscula) continue;
+    if (STOPWORDS.has(normalizar(token))) continue;
+
+    return token; // Primeiro candidato válido
+  }
+  return undefined;
+}
+
+// ─── Formata agenda para o prompt ─────────────────────────────────────────────
+
+function formatarAgenda(agendamentos: Appointment[]): string {
+  if (agendamentos.length === 0) return "Nenhum agendamento futuro cadastrado.";
+
+  return agendamentos
+    .slice(0, 20) // máx 20 itens para não estourar tokens
+    .map(a => {
+      const inicio = new Date(a.startTime);
+      const data = inicio.toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit" });
+      const hora = inicio.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+      const servicos = a.services.map(s => s.name).join(", ") || "—";
+      return `• ${data} ${hora} | Cliente: ${a.clientName ?? "—"} | Func. ID ${a.employeeId} | Serviço: ${servicos} | Status: ${a.status}`;
+    })
+    .join("\n");
+}
+
+// ─── Captura estado real do banco ─────────────────────────────────────────────
+
+async function capturarContexto(termoBusca?: string) {
+  const hoje = new Date().toISOString().split("T")[0];
+
+  // Garante que o cache está carregado (sem requisição extra se já estiver)
+  const [servicos, funcionarios] = await Promise.all([
+    servicesStore.list(true), // só ativos
+    employeesStore.list(true),
+  ]);
+
+  const agendaFutura = appointmentsStore.list({ startDate: hoje });
+
+  // Busca de clientes
+  let clientesEncontrados: Awaited<ReturnType<typeof clientsStore.search>> = [];
+  let historicoCliente = "";
+
+  if (termoBusca) {
+    try {
+      // Usa o search robusto do store (fuzzy + NFD + fallback Supabase)
+      clientesEncontrados = await clientsStore.search(termoBusca, { limit: 5 });
+    } catch {
+      // Fallback direto ao Supabase se o store falhar
+      const { data } = await supabase
+        .from("clients")
+        .select("*")
+        .ilike("name", `%${termoBusca}%`)
+        .limit(5);
+      clientesEncontrados = (data ?? []) as any;
+    }
+
+    // Histórico do cliente mais relevante
+    if (clientesEncontrados.length > 0) {
+      const cliente = clientesEncontrados[0];
+      try {
+        const { data: hist } = await supabase
+          .from("appointments")
+          .select("services, start_time, status")
+          .eq("client_id", cliente.id)
+          .neq("status", "cancelled")
+          .order("start_time", { ascending: false })
+          .limit(5);
+
+        if (hist && hist.length > 0) {
+          const linhas = hist.map(h => {
+            const data = new Date(h.start_time).toLocaleDateString("pt-BR");
+            const servs = Array.isArray(h.services)
+              ? h.services.map((s: any) => s.name ?? s).join(", ")
+              : "—";
+            return `  - ${servs} em ${data} (${h.status})`;
+          });
+          historicoCliente = `Histórico de ${cliente.name}:\n${linhas.join("\n")}`;
+        } else {
+          historicoCliente = `${cliente.name} não possui histórico de agendamentos.`;
+        }
+      } catch {
+        historicoCliente = "Histórico indisponível no momento.";
+      }
+    }
+  }
+
+  return {
+    servicos,
+    funcionarios,
+    agendaFutura,
+    clientesEncontrados,
+    historicoCliente,
+    hoje,
+  };
+}
+
+// ─── Monta o System Prompt ────────────────────────────────────────────────────
+
+function montarSystemPrompt(ctx: Awaited<ReturnType<typeof capturarContexto>>): string {
+  const agora = new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+
+  const servicosFormatados = ctx.servicos.map(s =>
+    `  • [ID ${s.id}] ${s.name} — R$ ${s.price.toFixed(2)} — ${s.durationMinutes} min`
+  ).join("\n") || "  Nenhum serviço cadastrado.";
+
+  const funcFormatados = ctx.funcionarios.map(f =>
+    `  • [ID ${f.id}] ${f.name}`
+  ).join("\n") || "  Nenhum funcionário ativo.";
+
+  const clientesFormatados = ctx.clientesEncontrados.length > 0
+    ? ctx.clientesEncontrados.map(c =>
+        `  • [ID ${c.id}] ${c.name}${c.phone ? ` — ${c.phone}` : ""}`
+      ).join("\n")
+    : "  Nenhum cliente encontrado para este termo.";
+
+  return `Você é o Assistente IA do salão Domínio Pro. Responda SEMPRE em português do Brasil.
+Seja direto, objetivo e amigável. Nunca invente dados — use APENAS o que está abaixo.
+
+════════════════ DADOS REAIS DO SISTEMA ════════════════
+🕐 AGORA: ${agora}
+
+📋 SERVIÇOS ATIVOS:
+${servicosFormatados}
+
+👥 EQUIPE ATIVA:
+${funcFormatados}
+
+${ctx.clientesEncontrados.length > 0 ? `🔍 CLIENTES ENCONTRADOS:
+${clientesFormatados}
+
+${ctx.historicoCliente ? `📅 ${ctx.historicoCliente}` : ""}
+` : ""}
+📆 AGENDA (próximos agendamentos):
+${formatarAgenda(ctx.agendaFutura)}
+════════════════════════════════════════════════════════
+
+📌 REGRAS OBRIGATÓRIAS:
+1. SERVIÇOS: Mencione apenas IDs e nomes da lista acima. Nunca invente preço ou duração.
+2. FUNCIONÁRIOS: Use apenas IDs e nomes da lista acima.
+3. CONFLITO DE HORÁRIO: Antes de confirmar, verifique se o funcionário já tem agendamento naquele horário na AGENDA.
+4. CRIAÇÃO DE AGENDAMENTO: Você precisa coletar TODOS estes dados antes de confirmar:
+   - Nome completo do cliente (se encontrado na lista, use o ID)
+   - Serviço (ID e nome)
+   - Funcionário (ID e nome)
+   - Data no formato YYYY-MM-DD
+   - Hora no formato HH:MM
+   Se faltar qualquer informação, PERGUNTE antes de confirmar.
+5. CONFIRMAÇÃO: Quando tiver todos os dados, resuma o agendamento e peça confirmação do usuário.
+6. AÇÃO DO SISTEMA: Somente após o usuário confirmar, inclua ao final da resposta:
+   [ACAO_SISTEMA: {"tipo":"CRIAR_AGENDAMENTO","payload":{"clienteNome":"NOME","clienteId":ID_OU_NULL,"servicoId":ID,"servicoNome":"NOME","servicoPreco":PRECO,"duracaoMin":DURACAO,"funcionarioId":ID,"funcionarioNome":"NOME","data":"YYYY-MM-DD","hora":"HH:MM"}}]
+   Substitua ID_OU_NULL pelo ID numérico do cliente se encontrado, ou null se não cadastrado.
+7. HISTÓRICO: Se o cliente tiver histórico, sugira o serviço que ele costuma fazer.`;
+}
+
+// ─── Executa o agendamento no Supabase via store ──────────────────────────────
+
+async function criarAgendamentoNoSistema(payload: {
+  clienteNome: string;
+  clienteId: number | null;
+  servicoId: number;
+  servicoNome: string;
+  servicoPreco: number;
+  duracaoMin: number;
+  funcionarioId: number;
+  funcionarioNome: string;
+  data: string; // YYYY-MM-DD
+  hora: string; // HH:MM
+}): Promise<Appointment> {
+  // Monta timestamps ISO com timezone local (Brasil)
+  const startTime = new Date(`${payload.data}T${payload.hora}:00`).toISOString();
+  const endTime = new Date(
+    new Date(`${payload.data}T${payload.hora}:00`).getTime() + payload.duracaoMin * 60_000
+  ).toISOString();
+
+  const servicoItem: AppointmentService = {
+    serviceId: payload.servicoId,
+    name: payload.servicoNome,
+    price: payload.servicoPreco,
+    durationMinutes: payload.duracaoMin,
+    color: "#ec4899",
+    materialCostPercent: 0,
+  };
+
+  return appointmentsStore.create({
+    clientName: payload.clienteNome,
+    clientId: payload.clienteId,
+    employeeId: payload.funcionarioId,
+    startTime,
+    endTime,
+    status: "scheduled",
+    totalPrice: payload.servicoPreco,
+    notes: "Criado via Agente IA",
+    paymentStatus: null,
+    groupId: null,
+    services: [servicoItem],
+  });
+}
+
+// ─── Função principal exportada ───────────────────────────────────────────────
+
+export async function executarAgente(
+  mensagemUsuario: string,
+  historicoConversa: MensagemConversa[] = []
+): Promise<ResultadoAgente> {
+  try {
+    // 1. Detecta nome e carrega contexto do banco
+    const nome = detectarNomeNaMensagem(mensagemUsuario);
+    const ctx = await capturarContexto(nome);
+    const systemPrompt = montarSystemPrompt(ctx);
+
+    // 2. Monta histórico (últimas 6 trocas — reduz tokens e chance de rate limit)
+    const mensagensApi = [
+      ...historicoConversa.slice(-6),
+      { role: "user" as const, content: mensagemUsuario },
+    ];
+
+    const body = JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...mensagensApi,
+      ],
+      temperature: 0.2,
+      max_tokens: 768,
+    });
+
+    // 3. Chama a API Groq com retry automático no 429
+    let response: Response | null = null;
+    for (let tentativa = 0; tentativa < 3; tentativa++) {
+      response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${import.meta.env.VITE_GROQ_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body,
+      });
+      if (response.status !== 429) break;
+      // Rate limit — espera antes de tentar novamente (2s, 4s)
+      await new Promise(r => setTimeout(r, 2000 * (tentativa + 1)));
+    }
+
+    if (!response || !response.ok) {
+      const errBody = await response?.text().catch(() => "") ?? "";
+      console.error("[AI Agent] Groq HTTP error:", response?.status, errBody);
+      throw new Error(`Groq ${response.status}`);
+    }
+
+    const data = await response.json();
+    const respostaCompleta: string = data.choices?.[0]?.message?.content ?? "";
+
+    // 4. Processa comando de agendamento se presente
+    const match = respostaCompleta.match(/\[ACAO_SISTEMA:\s*(\{[\s\S]*?\})\]/);
+    let agendamentoCriado: Appointment | undefined;
+
+    if (match) {
+      try {
+        // O modelo retorna: {"tipo":"CRIAR_AGENDAMENTO","payload":{...campos...}}
+        const parsed = JSON.parse(match[1]);
+        if (parsed?.tipo === "CRIAR_AGENDAMENTO" && parsed?.payload) {
+          const p = parsed.payload;
+          agendamentoCriado = await criarAgendamentoNoSistema(p);
+          console.info("[AI Agent] Agendamento criado:", agendamentoCriado.id);
+        }
+      } catch (e) {
+        console.error("[AI Agent] Falha ao criar agendamento:", e);
+        // Não falha silenciosamente — informa o usuário
+        const textoLimpo = respostaCompleta.replace(/\[ACAO_SISTEMA:[\s\S]*?\]/g, "").trim();
+        return {
+          texto: textoLimpo + "\n\n⚠️ Houve um erro ao salvar o agendamento no sistema. Por favor, tente novamente ou registre manualmente.",
+          erro: String(e),
+        };
+      }
+    }
+
+    // 5. Remove o marcador técnico da resposta exibida ao usuário
+    const textoLimpo = respostaCompleta.replace(/\[ACAO_SISTEMA:[\s\S]*?\]/g, "").trim();
+
+    return {
+      texto: textoLimpo,
+      agendamentoCriado,
+    };
+
+  } catch (error) {
+    console.error("[AI Agent] Erro geral:", error);
+    const msg = error instanceof Error ? error.message : String(error);
+
+    if (msg.includes("401")) {
+      return { texto: "❌ Chave da API inválida. Verifique VITE_GROQ_API_KEY no Vercel.", erro: msg };
+    }
+    if (msg.includes("429")) {
+      return { texto: "⏳ Muitas requisições. Aguarde alguns segundos e tente novamente.", erro: msg };
+    }
+    if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
+      return { texto: "📡 Sem conexão com o servidor. Verifique sua internet.", erro: msg };
+    }
+
+    return {
+      texto: "❌ Erro inesperado no agente. Verifique o console para detalhes.",
+      erro: msg,
+    };
+  }
+}
