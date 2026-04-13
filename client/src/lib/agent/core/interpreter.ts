@@ -202,4 +202,165 @@ export function resolveDateFromText(
     }
   }
 
-  const keys = Object.keys(WEEKDAY_SHORT).sort((a, b) => b.length
+  const keys = Object.keys(WEEKDAY_SHORT).sort((a, b) => b.length - a.length);
+
+  for (const key of keys) {
+    const rx = new RegExp(`\\b${escapeRegex(key)}\\b`, "i");
+    if (!rx.test(input)) continue;
+
+    const target = WEEKDAY_SHORT[key];
+    const current = today.getDay();
+    let diff = target - current;
+
+    if (diff <= 0) diff += 7;
+
+    const d = new Date(today);
+    d.setDate(d.getDate() + diff);
+    return ymd(d);
+  }
+
+  return undefined;
+}
+
+export function isPastDate(dateStr: string): boolean {
+  return dateStr < ymd(getLocalNow());
+}
+
+function cleanClientCandidate(input: string): string | undefined {
+  if (!input) return undefined;
+
+  let text = normalizar(input);
+
+  text = text.replace(/\b(20\d{2}-\d{2}-\d{2})\b/g, " ");
+  text = text.replace(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/g, " ");
+  text = text.replace(/\b\d{1,2}(?::|h)?\d{0,2}\b/g, " ");
+  text = text.replace(/[.,;!?()[\]{}"'`´“”]/g, " ");
+  text = text.replace(/\s+/g, " ").trim();
+
+  if (!text) return undefined;
+
+  const tokens = text
+    .split(" ")
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .filter((token) => !NON_NAME_WORDS.has(token))
+    .filter((token) => !/^\d+$/.test(token));
+
+  if (!tokens.length) return undefined;
+
+  const candidate = tokens.slice(0, 4).join(" ").trim();
+  if (!candidate || candidate.length < 2) return undefined;
+
+  return candidate;
+}
+
+export function extractLikelyClientTerm(msg: string): string | undefined {
+  const raw = msg.trim().replace(/\s+/g, " ");
+  if (!raw) return undefined;
+
+  const quoted = raw.match(/["“”'`](.{2,60})["“”'`]/);
+  if (quoted?.[1]) {
+    const candidate = cleanClientCandidate(quoted[1]);
+    if (candidate) return candidate;
+  }
+
+  const patterns = [
+    /(?:cliente|pra|para|da|do|de)\s+([^,.;!?]+)/i,
+    /(?:agendar|marcar|remarcar|reagendar|cancelar|desmarcar|mover|encaixar|encaixe)\s+([^,.;!?]+)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (!match?.[1]) continue;
+
+    const candidate = cleanClientCandidate(match[1]);
+    if (candidate) return candidate;
+  }
+
+  const capitals = raw.match(
+    /\b([A-ZÀ-Ú][\wÀ-ÿ'’-]+(?:\s+[A-ZÀ-Ú][\wÀ-ÿ'’-]+){0,3})\b/g,
+  );
+  if (capitals?.length) {
+    const candidate = cleanClientCandidate(capitals[0]);
+    if (candidate) return candidate;
+  }
+
+  if (raw.split(/\s+/).length <= 4) {
+    const fallback = cleanClientCandidate(raw);
+    if (fallback) return fallback;
+  }
+
+  return undefined;
+}
+
+export function detectIntent(msg: string): AgentIntent {
+  const n = normalizar(msg);
+
+  if (
+    /(remarcar|remarca|reagendar|reagenda|mover horario|mudar horario|mover agendamento)/.test(
+      n,
+    )
+  ) {
+    return "reschedule";
+  }
+
+  if (
+    /(cancelar agendamento|cancelar horario|cancelar horário|desmarcar|cancela a agenda|cancelar a agenda|cancelar)/.test(
+      n,
+    )
+  ) {
+    return "cancel";
+  }
+
+  if (/(cadastrar cliente|criar cliente|novo cliente|cadastro de cliente)/.test(n)) {
+    return "create_client";
+  }
+
+  if (
+    /(quais agendamentos|agenda de hoje|agenda de amanha|agenda de amanhã|como esta a agenda|como está a agenda|listar agenda|lista da agenda|agendamentos de hoje|agendamentos de amanha|agendamentos de amanhã)/.test(
+      n,
+    )
+  ) {
+    return "query_schedule";
+  }
+
+  if (/(livres|disponiveis|disponíveis|equipe livre|funcionarios livres|funcionários livres)/.test(n)) {
+    return "query_available";
+  }
+
+  if (/(faturamento|caixa|receita|entrou|financeiro)/.test(n)) {
+    return "query_finance";
+  }
+
+  if (/(buscar cliente|telefone do cliente|cpf do cliente|email do cliente|dados do cliente)/.test(n)) {
+    return "query_client";
+  }
+
+  if (
+    /(agendar|novo agendamento|marcar horario|marcar horário|marcar|agenda|encaixar|encaixe)/.test(
+      n,
+    )
+  ) {
+    return "schedule";
+  }
+
+  return "unknown";
+}
+
+export function interpretMessage(msg: string): AgentInterpretation {
+  const normalized = normalizar(msg);
+
+  return {
+    intent: detectIntent(msg),
+    raw: msg,
+    normalized,
+    date: resolveDateFromText(msg, false),
+    time: extractTime(msg),
+    clientHint: extractLikelyClientTerm(msg),
+    serviceHint: undefined,
+    employeeHint: undefined,
+    explicitCreateClient: /(cadastrar cliente|criar cliente|pode cadastrar|cadastre o cliente)/.test(
+      normalized,
+    ),
+  };
+}
