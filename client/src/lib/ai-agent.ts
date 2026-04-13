@@ -1,300 +1,60 @@
 /**
- * ai-agent.ts — Agente oficial do clone, reforçado com protocolo operacional.
+ * ai-agent.ts — Fachada do agente modular.
  *
- * Mantém a interface pública do app:
- * - exporta executarAgente()
- * - usa stores reais do sistema
- * - não cria outro agente paralelo
- *
- * Regras aplicadas:
- * - não agenda com conflito
- * - não cria cliente automático
- * - não edita cadastro sem pedido explícito
+ * Regras fixas preservadas:
  * - agenda é a fonte de verdade
- * - em ambiguidade, pergunta sempre
- * - uma etapa por vez: cliente -> data -> horário -> serviço -> profissional -> confirmação
- * - não assume serviço múltiplo
+ * - não agenda com conflito
+ * - agente não cria cliente automaticamente
+ * - não edita cadastro sem pedido explícito
+ * - uma etapa por vez
  */
 
-import { supabase } from "./supabase";
+import { appointmentsStore, type Appointment } from "./store";
+import { addAgentAudit } from "./agent/core/audit";
 import {
-  servicesStore,
-  employeesStore,
-  clientsStore,
-  appointmentsStore,
-  cashSessionsStore,
-  type Appointment,
-  type AppointmentService,
-  type Client,
-  type Employee,
-  type Service,
-} from "./store";
+  detectIntent,
+  extractLikelyClientTerm,
+  formatDateLong,
+  interpretMessage,
+  isPastDate,
+  NO,
+  normalizar,
+  YES,
+} from "./agent/core/interpreter";
+import {
+  answerWithLLM,
+  executeCancellation,
+  executeReschedule,
+  executeScheduleCreation,
+  queryAvailable,
+  queryClient,
+  queryFinance,
+  querySchedule,
+} from "./agent/core/executor";
+import { clearDraft, loadDraft, saveDraft, shouldReplaceDraft } from "./agent/core/session-state";
+import {
+  ensureBaseLoaded,
+  findEmployeeInMessage,
+  findServiceInMessage,
+  resolveClientByTerm,
+  resolveClientFromMessage,
+} from "./agent/domain/context-loader";
+import {
+  resolveAppointmentForCancel,
+  validateRescheduleDraft,
+  validateScheduleDraft,
+} from "./agent/domain/scheduling-validator";
+import type {
+  CancelDraft,
+  MensagemConversa,
+  RescheduleDraft,
+  ResultadoAgente,
+  ScheduleDraft,
+} from "./agent/types";
 
-export interface MensagemConversa {
-  role: "user" | "assistant";
-  content: string;
-}
+export type { MensagemConversa, ResultadoAgente } from "./agent/types";
 
-export interface ResultadoAgente {
-  texto: string;
-  agendamentoCriado?: Appointment;
-  erro?: string;
-}
-
-type Intent = "schedule" | "query_schedule" | "query_finance" | "query_client" | "query_available" | "unknown";
-
-interface DraftState {
-  intent: "schedule";
-  client?: Client;
-  date?: string; // YYYY-MM-DD
-  time?: string; // HH:MM
-  service?: Service;
-  employee?: Employee;
-  awaitingConfirmation?: boolean;
-  updatedAt: number;
-}
-
-const DRAFT_KEY = "dominio_pro_ai_agent_draft_v1";
-const TZ = "America/Sao_Paulo";
-const WEEKDAY_LONG = ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"] as const;
-const WEEKDAY_SHORT: Record<string, number> = {
-  dom: 0, domingo: 0,
-  seg: 1, segunda: 1, "segunda-feira": 1,
-  ter: 2, terca: 2, terça: 2, "terca-feira": 2, "terça-feira": 2,
-  qua: 3, quarta: 3, "quarta-feira": 3,
-  qui: 4, quinta: 4, "quinta-feira": 4,
-  sex: 5, sexta: 5, "sexta-feira": 5,
-  sab: 6, sabado: 6, sábado: 6,
-};
-const YES = /^(sim|s|ok|confirmo|confirmar|pode|isso|isso mesmo|pode confirmar)[.! ]*$/i;
-const NO = /^(nao|não|cancelar|cancela|deixa|deixa pra la|deixa pra lá)[.! ]*$/i;
-
-function normalizar(s: string): string {
-  return (s || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim();
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function loadDraft(): DraftState | null {
-  try {
-    const raw = localStorage.getItem(DRAFT_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as DraftState;
-    if (!parsed?.updatedAt || Date.now() - parsed.updatedAt > 30 * 60_000) {
-      localStorage.removeItem(DRAFT_KEY);
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function saveDraft(draft: DraftState | null): void {
-  if (!draft) {
-    localStorage.removeItem(DRAFT_KEY);
-    return;
-  }
-  draft.updatedAt = Date.now();
-  localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
-}
-
-function getLocalNow(): Date {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: TZ,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).formatToParts(new Date());
-  const pick = (type: string) => parts.find(p => p.type === type)?.value ?? "00";
-  return new Date(`${pick("year")}-${pick("month")}-${pick("day")}T${pick("hour")}:${pick("minute")}:${pick("second")}`);
-}
-
-function ymd(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
-function parseYMD(dateStr: string): Date {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  return new Date(y, m - 1, d, 12, 0, 0);
-}
-
-function formatDateLong(dateStr: string): string {
-  const d = parseYMD(dateStr);
-  return d.toLocaleDateString("pt-BR", {
-    weekday: "long",
-    day: "2-digit",
-    month: "2-digit",
-    timeZone: TZ,
-  });
-}
-
-function getWeekdayName(dateStr: string): string {
-  return WEEKDAY_LONG[parseYMD(dateStr).getDay()];
-}
-
-function extractTime(raw: string): string | undefined {
-  const m = raw.match(/\b(\d{1,2})(?::|h)?(\d{2})?\b/);
-  if (!m) return undefined;
-  const hh = Number(m[1]);
-  const mm = Number(m[2] ?? 0);
-  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return undefined;
-  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
-}
-
-function resolveDateFromText(raw: string, allowPast = false): string | undefined {
-  const input = normalizar(raw);
-  if (!input) return undefined;
-
-  const today = getLocalNow();
-  today.setHours(12, 0, 0, 0);
-
-  if (/\bhoje\b/.test(input)) return ymd(today);
-  if (/\bontem\b/.test(input)) {
-    const d = new Date(today);
-    d.setDate(d.getDate() - 1);
-    return allowPast ? ymd(d) : undefined;
-  }
-  if (/\bdepois de amanha\b|\bdepois de amanhã\b/.test(input)) {
-    const d = new Date(today);
-    d.setDate(d.getDate() + 2);
-    return ymd(d);
-  }
-  if (/\bamanha\b|\bamanhã\b/.test(input)) {
-    const d = new Date(today);
-    d.setDate(d.getDate() + 1);
-    return ymd(d);
-  }
-
-  const iso = input.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
-
-  const br = input.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
-  if (br) {
-    const day = Number(br[1]);
-    const month = Number(br[2]);
-    let year = Number(br[3] ?? today.getFullYear());
-    if (year < 100) year += 2000;
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      const d = new Date(year, month - 1, day, 12, 0, 0);
-      return ymd(d);
-    }
-  }
-
-  const keys = Object.keys(WEEKDAY_SHORT).sort((a, b) => b.length - a.length);
-  for (const key of keys) {
-    const rx = new RegExp(`\\b${escapeRegex(key)}\\b`, "i");
-    if (!rx.test(input)) continue;
-    const target = WEEKDAY_SHORT[key];
-    const current = today.getDay();
-    let diff = target - current;
-    if (diff <= 0) diff += 7;
-    const d = new Date(today);
-    d.setDate(d.getDate() + diff);
-    return ymd(d);
-  }
-
-  return undefined;
-}
-
-function isPastDate(dateStr: string): boolean {
-  const today = ymd(getLocalNow());
-  return dateStr < today;
-}
-
-function timeToMinutes(t: string): number {
-  const [h, m] = t.split(":").map(Number);
-  return h * 60 + m;
-}
-
-function isScheduleIntent(msg: string): boolean {
-  const n = normalizar(msg);
-  return /(agendar|agenda|marcar|marca|horario|horário|encaixar|encaixe|desmarcar|remarcar|reagendar)/.test(n);
-}
-
-function detectIntent(msg: string): Intent {
-  const n = normalizar(msg);
-  if (isScheduleIntent(msg)) return "schedule";
-  if (/(agenda|agendamentos|quem esta|quem está|horarios livres|horários livres)/.test(n)) return "query_schedule";
-  if (/(faturamento|caixa|receita|entrou|financeiro)/.test(n)) return "query_finance";
-  if (/(buscar cliente|cliente|telefone|cpf|email)/.test(n)) return "query_client";
-  if (/(livres|disponiveis|disponíveis|equipe livre|funcionarios livres|funcionários livres)/.test(n)) return "query_available";
-  return "unknown";
-}
-
-async function ensureBaseLoaded(): Promise<void> {
-  await Promise.allSettled([
-    clientsStore.ensureLoaded(),
-    Promise.resolve(servicesStore.list(true).length || servicesStore.fetchAll()),
-    Promise.resolve(employeesStore.list(true).length || employeesStore.fetchAll()),
-    Promise.resolve(appointmentsStore.list().length || appointmentsStore.fetchAll()),
-    Promise.resolve(cashSessionsStore.list().length || cashSessionsStore.fetchAll()),
-  ]);
-}
-
-function findServiceInMessage(msg: string): Service | undefined {
-  const n = normalizar(msg);
-  const services = servicesStore.list(true);
-  return services
-    .map(service => ({ service, score: scoreNameMatch(n, service.name) }))
-    .filter(x => x.score > 0.75)
-    .sort((a, b) => b.score - a.score)[0]?.service;
-}
-
-function findEmployeeInMessage(msg: string): Employee | undefined {
-  const n = normalizar(msg);
-  const employees = employeesStore.list(true);
-  return employees
-    .map(employee => ({ employee, score: scoreNameMatch(n, employee.name) }))
-    .filter(x => x.score > 0.75)
-    .sort((a, b) => b.score - a.score)[0]?.employee;
-}
-
-function scoreNameMatch(haystack: string, candidate: string): number {
-  const c = normalizar(candidate);
-  if (!c) return 0;
-  if (haystack.includes(c)) return 1;
-  const tokens = c.split(/\s+/).filter(Boolean);
-  if (tokens.length && tokens.every(t => haystack.includes(t))) return 0.9;
-  const intersect = tokens.filter(t => haystack.includes(t)).length;
-  return intersect / Math.max(tokens.length, 1);
-}
-
-function extractLikelyClientTerm(msg: string): string | undefined {
-  const raw = msg.trim();
-  const after = raw.match(/(?:cliente|pra|para|da|do)\s+([A-ZÀ-Ú][\wÀ-ÿ'’-]+(?:\s+[A-ZÀ-Ú][\wÀ-ÿ'’-]+){0,3})/);
-  if (after?.[1]) return after[1].trim();
-
-  const capitals = raw.match(/\b([A-ZÀ-Ú][\wÀ-ÿ'’-]+(?:\s+[A-ZÀ-Ú][\wÀ-ÿ'’-]+){0,3})\b/g);
-  if (capitals?.length) return capitals[0].trim();
-  return undefined;
-}
-
-async function resolveClient(msg: string): Promise<{ client?: Client; error?: string }> {
-  const term = extractLikelyClientTerm(msg);
-  if (!term) return {};
-  const found = await clientsStore.search(term, { limit: 5 });
-  if (found.length === 1) return { client: found[0] };
-  if (found.length > 1) {
-    return { error: `Encontrei mais de um cliente para "${term}". Seja mais específico.` };
-  }
-  return { error: `Não encontrei cliente para "${term}". Não posso criar cliente automaticamente.` };
-}
-
-function summarizeDraft(draft: DraftState): string {
+function summarizeScheduleDraft(draft: ScheduleDraft): string {
   return [
     `Cliente: ${draft.client?.name}`,
     `Data: ${draft.date ? formatDateLong(draft.date) : "—"}`,
@@ -304,218 +64,209 @@ function summarizeDraft(draft: DraftState): string {
   ].join("\n");
 }
 
-function nextQuestion(draft: DraftState): string {
+function summarizeAppointment(appointment: Appointment): string {
+  const date = appointment.startTime.slice(0, 10);
+  const time = new Date(appointment.startTime).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  const service = appointment.services[0]?.name ?? "—";
+  return `Cliente: ${appointment.clientName ?? "—"}\nData: ${formatDateLong(date)}\nHorário: ${time}\nServiço: ${service}`;
+}
+
+function nextScheduleQuestion(draft: ScheduleDraft): string {
   if (!draft.client) return "Qual é o cliente?";
   if (!draft.date) return "Qual é a data?";
   if (!draft.time) return "Qual é o horário?";
   if (!draft.service) return "Qual é o serviço?";
   if (!draft.employee) return "Qual é o profissional?";
-  return `Confirma?\n${summarizeDraft(draft)}`;
+  return `Confirma?\n${summarizeScheduleDraft(draft)}`;
 }
 
-function buildAppointmentPayload(draft: DraftState): Omit<Appointment, "id" | "createdAt"> {
-  const startTime = new Date(`${draft.date}T${draft.time}:00`).toISOString();
-  const end = new Date(new Date(`${draft.date}T${draft.time}:00`).getTime() + (draft.service?.durationMinutes ?? 0) * 60_000);
-  const endTime = end.toISOString();
-  const serviceItem: AppointmentService = {
-    serviceId: draft.service!.id,
-    name: draft.service!.name,
-    price: draft.service!.price,
-    durationMinutes: draft.service!.durationMinutes,
-    color: draft.service!.color,
-    materialCostPercent: draft.service!.materialCostPercent,
-  };
-  return {
-    clientName: draft.client!.name,
-    clientId: draft.client!.id,
-    employeeId: draft.employee!.id,
-    startTime,
-    endTime,
-    status: "scheduled",
-    totalPrice: draft.service!.price,
-    notes: "Criado via Agente IA",
-    paymentStatus: null,
-    groupId: null,
-    services: [serviceItem],
-  };
+function nextCancelQuestion(draft: CancelDraft): string {
+  if (!draft.client) return "Qual é o cliente do agendamento que você quer cancelar?";
+  if (!draft.date && !draft.appointment) return "Qual é a data do agendamento que você quer cancelar?";
+  if (!draft.appointment) return `Ainda preciso identificar o agendamento certo de ${draft.client.name}. Me passe o horário exato.`;
+  return `Confirma o cancelamento?\n${summarizeAppointment(draft.appointment)}`;
 }
 
-function hasConflict(draft: DraftState): boolean {
-  const payload = buildAppointmentPayload(draft);
-  const start = new Date(payload.startTime).getTime();
-  const end = new Date(payload.endTime).getTime();
-  return appointmentsStore.list({ date: draft.date, employeeId: draft.employee!.id }).some(a => {
-    if (a.status === "cancelled") return false;
-    const aStart = new Date(a.startTime).getTime();
-    const aEnd = new Date(a.endTime).getTime();
-    return start < aEnd && end > aStart;
-  });
+function nextRescheduleQuestion(draft: RescheduleDraft): string {
+  if (!draft.client && !draft.appointment) return "Qual é o cliente do agendamento que você quer remarcar?";
+  if (!draft.appointment) return "Preciso identificar qual agendamento você quer remarcar. Me diga o cliente e, se houver mais de um horário, a data atual dele.";
+  if (!draft.newDate) return "Qual é a nova data?";
+  if (!draft.newTime) return "Qual é o novo horário?";
+  const professional = draft.newEmployee?.name ?? "mesmo profissional";
+  return `Confirma a remarcação?\nCliente: ${draft.appointment.clientName ?? "—"}\nNova data: ${formatDateLong(draft.newDate)}\nNovo horário: ${draft.newTime}\nProfissional: ${professional}`;
+}
+
+function findUniqueUpcomingAppointmentForClient(clientId: number): Appointment | undefined {
+  const today = new Date().toISOString().slice(0, 10);
+  const matches = appointmentsStore
+    .list({ startDate: today })
+    .filter((appointment) => appointment.clientId === clientId && appointment.status !== "cancelled")
+    .sort((a, b) => a.startTime.localeCompare(b.startTime));
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 async function handleScheduleFlow(msg: string): Promise<ResultadoAgente> {
   await ensureBaseLoaded();
-  const n = normalizar(msg);
-  let draft = loadDraft() ?? { intent: "schedule", updatedAt: Date.now() } as DraftState;
+  const interpretation = interpretMessage(msg);
+  const normalized = interpretation.normalized;
+  let draft = (loadDraft() as ScheduleDraft | null) ?? { intent: "schedule", updatedAt: Date.now() };
 
-  if (/\be\b/.test(n) && /( e |,)/.test(n) && /(servico|serviço|corte|escova|hidr|sobrancelha|unha)/.test(n)) {
+  if (/\be\b/.test(normalized) && /( e |,)/.test(normalized) && /(servico|serviço|corte|escova|hidr|sobrancelha|unha)/.test(normalized)) {
     return { texto: "Serviço múltiplo ainda não está fechado. Me passe um serviço por vez." };
   }
 
   if (draft.awaitingConfirmation) {
     if (YES.test(msg.trim())) {
-      if (!draft.client || !draft.date || !draft.time || !draft.service || !draft.employee) {
+      const validation = validateScheduleDraft(draft);
+      if (!validation.ok) {
         draft.awaitingConfirmation = false;
         saveDraft(draft);
-        return { texto: nextQuestion(draft) };
+        return { texto: validation.message ?? nextScheduleQuestion(draft) };
       }
-      if (hasConflict(draft)) {
-        draft.awaitingConfirmation = false;
-        draft.time = undefined;
-        saveDraft(draft);
-        return { texto: "Há conflito nesse horário. Me passe outro horário." };
-      }
-      const created = await appointmentsStore.create(buildAppointmentPayload(draft));
-      saveDraft(null);
-      return {
-        texto: `Agendamento confirmado.\n${summarizeDraft(draft)}`,
-        agendamentoCriado: created,
-      };
+      clearDraft();
+      return executeScheduleCreation(draft);
     }
     if (NO.test(msg.trim())) {
-      saveDraft(null);
+      clearDraft();
       return { texto: "Ok. Não executei nada." };
     }
-    // allow corrections while awaiting confirmation
     draft.awaitingConfirmation = false;
   }
 
   if (!draft.client) {
-    const resolved = await resolveClient(msg);
+    const resolved = await resolveClientFromMessage(msg);
     if (resolved.error) return { texto: resolved.error };
     if (resolved.client) draft.client = resolved.client;
   }
-  if (draft.client && !draft.date) {
-    const date = resolveDateFromText(msg, false);
-    if (date) {
-      if (isPastDate(date)) return { texto: "Não posso agendar em data passada." };
-      draft.date = date;
-    }
+
+  if (!draft.date && interpretation.date) {
+    if (isPastDate(interpretation.date)) return { texto: "Não posso agendar em data passada." };
+    draft.date = interpretation.date;
   }
-  if (draft.client && draft.date && !draft.time) {
-    const time = extractTime(msg);
-    if (time) draft.time = time;
-  }
-  if (draft.client && draft.date && draft.time && !draft.service) {
-    const service = findServiceInMessage(msg);
-    if (service) draft.service = service;
-  }
-  if (draft.client && draft.date && draft.time && draft.service && !draft.employee) {
-    const employee = findEmployeeInMessage(msg);
-    if (employee) draft.employee = employee;
+
+  if (!draft.time && interpretation.time) draft.time = interpretation.time;
+  if (!draft.service) draft.service = findServiceInMessage(msg);
+  if (!draft.employee) draft.employee = findEmployeeInMessage(msg);
+
+  const validation = validateScheduleDraft(draft);
+  if (draft.client && draft.date && draft.time && draft.service && draft.employee && !validation.ok) {
+    addAgentAudit("validation_blocked", validation.message ?? "Validação bloqueou agendamento", { intent: "schedule" });
+    if (/conflito|horário/.test(normalizar(validation.message ?? ""))) draft.time = undefined;
+    if (/compatível|profissional/.test(normalizar(validation.message ?? ""))) draft.employee = undefined;
+    saveDraft(draft);
+    return { texto: validation.message ?? nextScheduleQuestion(draft) };
   }
 
   if (draft.client && draft.date && draft.time && draft.service && draft.employee) {
-    if (hasConflict(draft)) {
-      draft.time = undefined;
-      saveDraft(draft);
-      return { texto: "Há conflito nesse horário. Me passe outro horário." };
-    }
     draft.awaitingConfirmation = true;
     saveDraft(draft);
-    return { texto: `Confirma?\n${summarizeDraft(draft)}` };
+    return { texto: `Confirma?\n${summarizeScheduleDraft(draft)}` };
   }
 
   saveDraft(draft);
-  return { texto: nextQuestion(draft) };
+  addAgentAudit("draft_updated", "Draft de agendamento atualizado", { intent: "schedule" });
+  return { texto: nextScheduleQuestion(draft) };
 }
 
-function getDateForQuery(msg: string, allowPast = true): string {
-  return resolveDateFromText(msg, allowPast) ?? ymd(getLocalNow());
-}
-
-function querySchedule(msg: string): ResultadoAgente {
-  const date = getDateForQuery(msg, true);
-  const list = appointmentsStore
-    .list({ date })
-    .filter(a => a.status !== "cancelled")
-    .sort((a, b) => a.startTime.localeCompare(b.startTime))
-    .slice(0, 20);
-  if (!list.length) return { texto: `Sem agendamentos para ${formatDateLong(date)}.` };
-  const lines = list.map(a => {
-    const time = new Date(a.startTime).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
-    const employee = employeesStore.list().find(e => e.id === a.employeeId)?.name ?? `ID ${a.employeeId}`;
-    const service = a.services[0]?.name ?? "—";
-    return `${time} — ${a.clientName ?? "—"} — ${service} — ${employee}`;
-  });
-  return { texto: `${formatDateLong(date)}\n${lines.join("\n")}` };
-}
-
-async function queryClient(msg: string): Promise<ResultadoAgente> {
+async function handleCancelFlow(msg: string): Promise<ResultadoAgente> {
   await ensureBaseLoaded();
-  const term = extractLikelyClientTerm(msg) ?? msg;
-  const found = await clientsStore.search(term, { limit: 5 });
-  if (!found.length) return { texto: `Não encontrei cliente para "${term}".` };
-  const c = found[0];
-  return { texto: `${c.name}${c.phone ? ` — ${c.phone}` : ""}${c.email ? ` — ${c.email}` : ""}` };
-}
+  let draft = (loadDraft() as CancelDraft | null) ?? { intent: "cancel", updatedAt: Date.now() };
+  const interpretation = interpretMessage(msg);
 
-function queryAvailable(msg: string): ResultadoAgente {
-  const date = getDateForQuery(msg, true);
-  const time = extractTime(msg);
-  const employees = employeesStore.list(true);
-  const free = time
-    ? employees.filter(emp => !appointmentsStore.list({ date, employeeId: emp.id }).some(a => {
-        if (a.status === "cancelled") return false;
-        const start = new Date(a.startTime).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
-        return start === time;
-      }))
-    : employees;
-  return { texto: free.length ? `Livres: ${free.map(e => e.name).join(", ")}` : "Nenhum profissional livre nesse horário." };
-}
-
-function queryFinance(msg: string): ResultadoAgente {
-  const date = getDateForQuery(msg, true);
-  const current = cashSessionsStore.getCurrent();
-  const dayEntries = current ? [] : [];
-  const completed = appointmentsStore.list({ date }).filter(a => a.status === "completed");
-  const total = completed.reduce((sum, a) => sum + Number(a.totalPrice ?? 0), 0);
-  if (/caixa/.test(normalizar(msg))) {
-    return { texto: current ? `Caixa aberto.` : `Caixa fechado.` };
+  if (draft.awaitingConfirmation && draft.appointment) {
+    if (YES.test(msg.trim())) {
+      clearDraft();
+      return executeCancellation(draft);
+    }
+    if (NO.test(msg.trim())) {
+      clearDraft();
+      return { texto: "Ok. Não cancelei nada." };
+    }
+    draft.awaitingConfirmation = false;
   }
-  return { texto: `Faturamento de ${formatDateLong(date)}: R$ ${total.toFixed(2)}` };
+
+  if (!draft.client) {
+    const resolved = await resolveClientFromMessage(msg);
+    if (resolved.error) return { texto: resolved.error };
+    if (resolved.client) draft.client = resolved.client;
+  }
+  if (!draft.date && interpretation.date) draft.date = interpretation.date;
+  if (!draft.time && interpretation.time) draft.time = interpretation.time;
+  if (!draft.employee) draft.employee = findEmployeeInMessage(msg);
+
+  const resolvedAppointment = resolveAppointmentForCancel(draft);
+  if (!resolvedAppointment.appointment) {
+    saveDraft(draft);
+    return { texto: resolvedAppointment.message ?? nextCancelQuestion(draft) };
+  }
+
+  draft.appointment = resolvedAppointment.appointment;
+  draft.awaitingConfirmation = true;
+  saveDraft(draft);
+  return { texto: `Confirma o cancelamento?\n${summarizeAppointment(draft.appointment)}` };
 }
 
-async function answerWithLLM(mensagemUsuario: string, historicoConversa: MensagemConversa[]): Promise<ResultadoAgente> {
-  const nome = extractLikelyClientTerm(mensagemUsuario);
-  const hoje = ymd(getLocalNow());
-  const [servicos, funcionarios] = await Promise.all([
-    Promise.resolve(servicesStore.list(true).length ? servicesStore.list(true) : servicesStore.fetchAll()),
-    Promise.resolve(employeesStore.list(true).length ? employeesStore.list(true) : employeesStore.fetchAll()),
-  ]);
-  const agendaFutura = appointmentsStore.list({ startDate: hoje });
-  let clientesEncontrados: Client[] = [];
-  if (nome) {
-    try { clientesEncontrados = await clientsStore.search(nome, { limit: 5 }); } catch {}
+async function handleRescheduleFlow(msg: string): Promise<ResultadoAgente> {
+  await ensureBaseLoaded();
+  let draft = (loadDraft() as RescheduleDraft | null) ?? { intent: "reschedule", updatedAt: Date.now() };
+  const interpretation = interpretMessage(msg);
+
+  if (draft.awaitingConfirmation && draft.appointment) {
+    if (YES.test(msg.trim())) {
+      const validation = validateRescheduleDraft(draft);
+      if (!validation.ok) {
+        draft.awaitingConfirmation = false;
+        saveDraft(draft);
+        return { texto: validation.message ?? nextRescheduleQuestion(draft) };
+      }
+      clearDraft();
+      return executeReschedule(draft);
+    }
+    if (NO.test(msg.trim())) {
+      clearDraft();
+      return { texto: "Ok. Não remarquei nada." };
+    }
+    draft.awaitingConfirmation = false;
   }
-  const systemPrompt = `Você é o assistente do salão Domínio Pro. Responda em pt-BR, curto e direto. Nunca invente dados. Não execute ações do sistema. Use só os dados abaixo.\n\nServiços:\n${servicos.map(s => `- ${s.name}`).join("\n")}\n\nEquipe:\n${funcionarios.map(f => `- ${f.name}`).join("\n")}\n\nClientes encontrados:\n${clientesEncontrados.map(c => `- ${c.name}`).join("\n") || "- nenhum"}\n\nAgenda futura:\n${agendaFutura.slice(0, 20).map(a => `- ${a.startTime} | ${a.clientName ?? "—"}`).join("\n") || "- vazia"}`;
-  const body = JSON.stringify({
-    model: "llama-3.3-70b-versatile",
-    messages: [{ role: "system", content: systemPrompt }, ...historicoConversa.slice(-6), { role: "user", content: mensagemUsuario }],
-    temperature: 0.2,
-    max_tokens: 300,
-  });
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${import.meta.env.VITE_GROQ_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body,
-  });
-  if (!response.ok) throw new Error(`Groq ${response.status}`);
-  const data = await response.json();
-  const texto = data.choices?.[0]?.message?.content?.trim() || "Não consegui responder agora.";
-  return { texto };
+
+  if (!draft.client && !draft.appointment) {
+    const resolved = await resolveClientFromMessage(msg);
+    if (resolved.error) return { texto: resolved.error };
+    if (resolved.client) draft.client = resolved.client;
+  }
+
+  if (!draft.appointment && draft.client) {
+    const unique = findUniqueUpcomingAppointmentForClient(draft.client.id);
+    if (!unique) {
+      saveDraft(draft);
+      return { texto: `Encontrei mais de um ou nenhum agendamento futuro para ${draft.client.name}. Me diga qual agendamento atual você quer remarcar.` };
+    }
+    draft.appointment = unique;
+  }
+
+  if (!draft.newDate && interpretation.date) {
+    if (isPastDate(interpretation.date)) return { texto: "Não posso remarcar para uma data passada." };
+    draft.newDate = interpretation.date;
+  }
+  if (!draft.newTime && interpretation.time) draft.newTime = interpretation.time;
+  if (!draft.newEmployee) draft.newEmployee = findEmployeeInMessage(msg);
+
+  const validation = validateRescheduleDraft(draft);
+  if (draft.appointment && draft.newDate && draft.newTime && !validation.ok) {
+    addAgentAudit("validation_blocked", validation.message ?? "Validação bloqueou remarcação", { intent: "reschedule" });
+    if (/horario|horário|conflito/.test(normalizar(validation.message ?? ""))) draft.newTime = undefined;
+    saveDraft(draft);
+    return { texto: validation.message ?? nextRescheduleQuestion(draft) };
+  }
+
+  if (draft.appointment && draft.newDate && draft.newTime) {
+    draft.awaitingConfirmation = true;
+    saveDraft(draft);
+    return { texto: nextRescheduleQuestion(draft) };
+  }
+
+  saveDraft(draft);
+  return { texto: nextRescheduleQuestion(draft) };
 }
 
 export async function executarAgente(
@@ -528,28 +279,53 @@ export async function executarAgente(
     if (!msg) return { texto: "Envie uma mensagem." };
 
     const pending = loadDraft();
-    if (pending?.intent === "schedule") {
-      return await handleScheduleFlow(msg);
+    const nextIntent = detectIntent(msg);
+    addAgentAudit("intent_detected", "Intenção detectada", { intent: nextIntent });
+
+    if (pending && !(pending.awaitingConfirmation && (YES.test(msg) || NO.test(msg))) && shouldReplaceDraft(pending.intent, nextIntent)) {
+      clearDraft();
     }
 
-    switch (detectIntent(msg)) {
+    const activeDraft = loadDraft();
+    if (activeDraft?.intent === "schedule") return handleScheduleFlow(msg);
+    if (activeDraft?.intent === "cancel") return handleCancelFlow(msg);
+    if (activeDraft?.intent === "reschedule") return handleRescheduleFlow(msg);
+
+    switch (nextIntent) {
       case "schedule":
-        return await handleScheduleFlow(msg);
-      case "query_schedule":
-        return querySchedule(msg);
-      case "query_finance":
-        return queryFinance(msg);
-      case "query_client":
-        return await queryClient(msg);
-      case "query_available":
-        return queryAvailable(msg);
+        return handleScheduleFlow(msg);
+      case "cancel":
+        return handleCancelFlow(msg);
+      case "reschedule":
+        return handleRescheduleFlow(msg);
+      case "query_schedule": {
+        const interpretation = interpretMessage(msg);
+        return querySchedule(msg, interpretation.date);
+      }
+      case "query_finance": {
+        const interpretation = interpretMessage(msg);
+        return queryFinance(msg, interpretation.date);
+      }
+      case "query_client": {
+        const term = extractLikelyClientTerm(msg) ?? msg;
+        return queryClient(term);
+      }
+      case "query_available": {
+        const interpretation = interpretMessage(msg);
+        return queryAvailable(interpretation.date, interpretation.time);
+      }
+      case "create_client":
+        return {
+          texto: "Entendi o pedido de cadastro. O agente não cria cliente automaticamente. Se quiser seguir por aqui, me passe o nome completo e pelo menos um contato, ou faça o cadastro direto pela agenda.",
+        };
       default:
-        return await answerWithLLM(msg, historicoConversa);
+        return answerWithLLM(msg, historicoConversa);
     }
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    if (msg.includes("401")) return { texto: "Chave da IA inválida.", erro: msg };
-    if (msg.includes("429")) return { texto: "Muitas requisições. Tente de novo em instantes.", erro: msg };
-    return { texto: "Erro ao processar a mensagem.", erro: msg };
+    const message = error instanceof Error ? error.message : String(error);
+    addAgentAudit("execution_error", "Erro no agente", { error: message });
+    if (message.includes("401")) return { texto: "Chave da IA inválida.", erro: message };
+    if (message.includes("429")) return { texto: "Muitas requisições. Tente de novo em instantes.", erro: message };
+    return { texto: "Erro ao processar a mensagem.", erro: message };
   }
 }
