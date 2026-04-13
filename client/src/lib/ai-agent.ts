@@ -66,9 +66,19 @@ interface PendingLearningApproval {
   createdAt: number;
 }
 
-const DRAFT_KEY = "dominio_pro_ai_agent_schedule_draft_v5";
+interface FeedbackRecord {
+  id: string;
+  kind: "like" | "dislike";
+  reason?: string;
+  createdAt: string;
+  draftSnapshot?: string;
+}
+
+const DRAFT_KEY = "dominio_pro_ai_agent_schedule_draft_v6";
 const LEARNING_KEY = "dominio_pro_ai_agent_learning_v1";
 const PENDING_LEARNING_KEY = "dominio_pro_ai_agent_pending_learning_v1";
+const FEEDBACK_KEY = "dominio_pro_ai_agent_feedback_v1";
+
 const TZ = "America/Sao_Paulo";
 
 const YES =
@@ -85,6 +95,11 @@ const LEARN_YES =
 
 const LEARN_NO =
   /^(nao aprender|não aprender|nao, aprender nao|não, aprender não|nao, obrigado|não, obrigado)[.! ]*$/i;
+
+const LIKE_ONLY = /^(like|👍)$/i;
+const DISLIKE_ONLY = /^(dislike|deslike|👎)$/i;
+const LIKE_WITH_REASON = /^(like|👍)\s*[:\-]\s*(.+)$/i;
+const DISLIKE_WITH_REASON = /^(dislike|deslike|👎)\s*[:\-]\s*(.+)$/i;
 
 const WEEKDAY_SHORT: Record<string, number> = {
   dom: 0,
@@ -202,10 +217,89 @@ function saveDraft(draft: DraftState | null): void {
   storage.setItem(DRAFT_KEY, JSON.stringify(draft));
 }
 
+function summarizeDraft(draft: DraftState | null): string | undefined {
+  if (!draft) return undefined;
+
+  return [
+    `Cliente: ${draft.client?.name ?? "—"}`,
+    `Data: ${draft.date ?? "—"}`,
+    `Horário: ${draft.time ?? "—"}`,
+    `Serviço: ${draft.service?.name ?? "—"}`,
+    `Profissional: ${draft.employee?.name ?? "—"}`,
+  ].join(" | ");
+}
+
+function addFeedback(
+  kind: "like" | "dislike",
+  reason?: string,
+  draft?: DraftState | null,
+): void {
+  try {
+    const storage = getStorage();
+    if (!storage) return;
+
+    const raw = storage.getItem(FEEDBACK_KEY);
+    const current = raw ? (JSON.parse(raw) as FeedbackRecord[]) : [];
+
+    const next: FeedbackRecord[] = [
+      {
+        id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        kind,
+        reason,
+        createdAt: new Date().toISOString(),
+        draftSnapshot: summarizeDraft(draft),
+      },
+      ...current,
+    ].slice(0, 200);
+
+    storage.setItem(FEEDBACK_KEY, JSON.stringify(next));
+  } catch {
+    // não quebra o fluxo
+  }
+}
+
+function handleFeedbackMessage(msg: string, draft: DraftState | null): ResultadoAgente | null {
+  const trimmed = msg.trim();
+
+  if (LIKE_WITH_REASON.test(trimmed)) {
+    const reason = trimmed.match(LIKE_WITH_REASON)?.[2]?.trim();
+    addFeedback("like", reason, draft);
+    return {
+      texto: "Like registrado com motivo. Vou usar isso como referência de avaliação do agente.",
+    };
+  }
+
+  if (DISLIKE_WITH_REASON.test(trimmed)) {
+    const reason = trimmed.match(DISLIKE_WITH_REASON)?.[2]?.trim();
+    addFeedback("dislike", reason, draft);
+    return {
+      texto: "Dislike registrado com motivo. Vou tratar isso como falha observada do agente.",
+    };
+  }
+
+  if (LIKE_ONLY.test(trimmed)) {
+    addFeedback("like", undefined, draft);
+    return {
+      texto: 'Like registrado. Se quiser detalhar, mande por exemplo: "like: entendeu o cliente certo".',
+    };
+  }
+
+  if (DISLIKE_ONLY.test(trimmed)) {
+    addFeedback("dislike", undefined, draft);
+    return {
+      texto:
+        'Dislike registrado. Se quiser detalhar, mande por exemplo: "dislike: repetiu pergunta do profissional".',
+    };
+  }
+
+  return null;
+}
+
 function getLearningSettings(): LearningSettings {
   try {
     const storage = getStorage();
     const raw = storage?.getItem(LEARNING_KEY);
+
     if (!raw) {
       return {
         preferCurrentSlotOnShortReply: false,
@@ -268,11 +362,13 @@ function maybeOfferLearning(
 ): string {
   const settings = getLearningSettings();
   if (settings[key]) return "";
+
   savePendingLearning({
     key,
     prompt,
     createdAt: Date.now(),
   });
+
   return `\n\n${prompt} Responda: "sim aprender" ou "não aprender".`;
 }
 
@@ -286,14 +382,16 @@ function handlePendingLearningAnswer(msg: string): ResultadoAgente | null {
     saveLearningSettings(settings);
     savePendingLearning(null);
     return {
-      texto: "Aprendizado aprovado. Vou usar isso como referência futura sem quebrar as regras do sistema.",
+      texto:
+        "Aprendizado aprovado. Vou usar isso como referência futura sem quebrar as regras do sistema.",
     };
   }
 
   if (LEARN_NO.test(msg.trim())) {
     savePendingLearning(null);
     return {
-      texto: "Certo. Corrijo o caso atual quando necessário, mas não vou usar isso como referência futura.",
+      texto:
+        "Certo. Corrijo o caso atual quando necessário, mas não vou usar isso como referência futura.",
     };
   }
 
@@ -431,11 +529,11 @@ function scoreByTokens(haystack: string, candidate: string): number {
 }
 
 function getActiveServices(): Service[] {
-  return servicesStore.list(true).filter((service) => service.active);
+  return servicesStore.list(true);
 }
 
 function getActiveEmployees(): Employee[] {
-  return employeesStore.list(true).filter((employee) => employee.active);
+  return employeesStore.list(true);
 }
 
 function extractTime(raw: string): string | undefined {
@@ -551,6 +649,40 @@ function isLikelyFullSentence(text: string): boolean {
   );
 }
 
+function isProfessionalsListQuery(text: string): boolean {
+  const n = normalizar(text);
+  return /(lista de profissionais|quais profissionais|quem sao os profissionais|quem são os profissionais|profissionais disponiveis|profissionais disponíveis)/.test(
+    n,
+  );
+}
+
+function isServicesListQuery(text: string): boolean {
+  const n = normalizar(text);
+  return /(lista de servicos|lista de serviços|quais servicos|quais serviços|servicos disponiveis|serviços disponíveis)/.test(
+    n,
+  );
+}
+
+function formatProfessionalsList(): string {
+  const employees = getActiveEmployees().sort((a, b) =>
+    a.name.localeCompare(b.name, "pt-BR"),
+  );
+
+  if (!employees.length) return "Não encontrei profissionais cadastrados.";
+
+  return `Profissionais cadastrados:\n- ${employees.map((item) => item.name).join("\n- ")}`;
+}
+
+function formatServicesList(): string {
+  const services = getActiveServices().sort((a, b) =>
+    a.name.localeCompare(b.name, "pt-BR"),
+  );
+
+  if (!services.length) return "Não encontrei serviços cadastrados.";
+
+  return `Serviços cadastrados:\n- ${services.map((item) => item.name).join("\n- ")}`;
+}
+
 function stripForClientCandidate(text: string): string {
   let out = normalizar(text);
 
@@ -624,12 +756,19 @@ function resolveBestEmployee(text: string): {
   employee?: Employee;
   ambiguous?: string[];
 } {
+  const explicit =
+    extractStructuredField(
+      text,
+      ["profissional", "com"],
+      ["cliente", "servico", "serviço", "horario", "horário", "data", "dia"],
+    ) ?? text;
+
   const base = getActiveEmployees();
 
   const scored = base
     .map((employee) => ({
       employee,
-      score: scoreByTokens(text, employee.name),
+      score: scoreByTokens(explicit, employee.name),
     }))
     .filter((item) => item.score >= 0.72)
     .sort(
@@ -648,7 +787,7 @@ function resolveBestEmployee(text: string): {
     return { employee: top.employee };
   }
 
-  const normalizedText = normalizar(text);
+  const normalizedText = normalizar(explicit);
   const exact = scored.filter((item) =>
     normalizedText.includes(normalizar(item.employee.name)),
   );
@@ -741,16 +880,6 @@ function clearSlot(draft: DraftState, slot: SlotName): void {
     draft.employeeQuery = undefined;
     draft.employeeOptions = undefined;
   }
-}
-
-function summarizeDraft(draft: DraftState): string {
-  return [
-    `Cliente: ${draft.client?.name ?? "—"}`,
-    `Data: ${draft.date ? formatDateLong(draft.date) : "—"}`,
-    `Horário: ${draft.time ?? "—"}`,
-    `Serviço: ${draft.service?.name ?? "—"}`,
-    `Profissional: ${draft.employee?.name ?? "—"}`,
-  ].join("\n");
 }
 
 function nextQuestion(draft: DraftState): string {
@@ -1113,6 +1242,18 @@ async function validateAndMaybeConfirm(draft: DraftState): Promise<ResultadoAgen
   return { texto: `Confirma?\n${summarizeDraft(draft)}` };
 }
 
+function getInFlowSideQueryResponse(draft: DraftState, msg: string): string | null {
+  if (isProfessionalsListQuery(msg)) {
+    return `${formatProfessionalsList()}\n\nVoltando ao agendamento: ${nextQuestion(draft)}`;
+  }
+
+  if (isServicesListQuery(msg)) {
+    return `${formatServicesList()}\n\nVoltando ao agendamento: ${nextQuestion(draft)}`;
+  }
+
+  return null;
+}
+
 async function handleScheduleFlow(msg: string): Promise<ResultadoAgente> {
   await ensureBaseLoaded();
 
@@ -1126,6 +1267,11 @@ async function handleScheduleFlow(msg: string): Promise<ResultadoAgente> {
       flow: "schedule",
       updatedAt: Date.now(),
     } as DraftState);
+
+  const sideQuery = getInFlowSideQueryResponse(draft, trimmed);
+  if (sideQuery) {
+    return { texto: sideQuery };
+  }
 
   if (
     /\be\b/.test(normalized) &&
@@ -1176,9 +1322,7 @@ async function handleScheduleFlow(msg: string): Promise<ResultadoAgente> {
           "preferCorrectionAfterNo",
           "Percebi que você corrigiu um campo com 'não + correção'. Quer que eu use esse padrão como referência futura?",
         );
-        return {
-          texto: `${afterCorrection.texto}${learnText}`,
-        };
+        return { texto: `${afterCorrection.texto}${learnText}` };
       }
 
       return { texto: nextQuestion(draft) };
@@ -1444,13 +1588,15 @@ export async function executarAgente(
     const msg = mensagemUsuario.trim();
     if (!msg) return { texto: "Envie uma mensagem." };
 
-    const pendingLearningAnswer = handlePendingLearningAnswer(msg);
-    if (pendingLearningAnswer) {
-      return pendingLearningAnswer;
-    }
+    const currentDraft = loadDraft();
 
-    const draft = loadDraft();
-    if (draft?.flow === "schedule") {
+    const feedbackResult = handleFeedbackMessage(msg, currentDraft);
+    if (feedbackResult) return feedbackResult;
+
+    const pendingLearningAnswer = handlePendingLearningAnswer(msg);
+    if (pendingLearningAnswer) return pendingLearningAnswer;
+
+    if (currentDraft?.flow === "schedule") {
       return await handleScheduleFlow(msg);
     }
 
@@ -1499,4 +1645,4 @@ export async function executarAgente(
       erro: message,
     };
   }
-    }
+}
