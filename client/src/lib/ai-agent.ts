@@ -1271,6 +1271,19 @@ async function handlePendingAction(pending: PendingAction, userMessage: string):
   return null;
 }
 
+
+
+function loadDraft(): null {
+  return null;
+}
+
+function handleFeedbackMessage(_message: string, _draft: null): ResultadoAgente | null {
+  return null;
+}
+
+function handlePendingLearningAnswer(_message: string): ResultadoAgente | null {
+  return null;
+}
 export function addFeedback(userMessage: string, agentResponse: string, rating: "good" | "bad"): void {
   try {
     const raw = getStorage()?.getItem(FEEDBACK_KEY);
