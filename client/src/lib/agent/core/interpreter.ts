@@ -11,6 +11,67 @@ const WEEKDAY_SHORT: Record<string, number> = {
   sab: 6, sabado: 6, sábado: 6,
 };
 
+const NON_NAME_WORDS = new Set([
+  "agendar",
+  "agenda",
+  "marcar",
+  "marca",
+  "remarcar",
+  "reagendar",
+  "cancelar",
+  "cancela",
+  "cancelamento",
+  "desmarcar",
+  "mover",
+  "encaixar",
+  "encaixe",
+  "cliente",
+  "pra",
+  "para",
+  "com",
+  "da",
+  "do",
+  "de",
+  "na",
+  "no",
+  "dia",
+  "as",
+  "às",
+  "hoje",
+  "amanha",
+  "amanhã",
+  "ontem",
+  "depois",
+  "semana",
+  "sexta",
+  "sabado",
+  "sábado",
+  "domingo",
+  "segunda",
+  "terca",
+  "terça",
+  "quarta",
+  "quinta",
+  "sexta-feira",
+  "segunda-feira",
+  "terca-feira",
+  "terça-feira",
+  "quarta-feira",
+  "quinta-feira",
+  "horario",
+  "horário",
+  "horas",
+  "hora",
+  "servico",
+  "serviço",
+  "corte",
+  "escova",
+  "hidratação",
+  "hidratacao",
+  "unha",
+  "sobrancelha",
+]);
+
 export const YES = /^(sim|s|ok|confirmo|confirmar|pode|isso|isso mesmo|pode confirmar|confirmado)[.! ]*$/i;
 export const NO = /^(nao|não|cancelar|cancela|deixa|deixa pra la|deixa pra lá|negativo)[.! ]*$/i;
 
@@ -37,8 +98,12 @@ function getLocalNow(): Date {
     second: "2-digit",
     hour12: false,
   }).formatToParts(new Date());
+
   const pick = (type: string) => parts.find((p) => p.type === type)?.value ?? "00";
-  return new Date(`${pick("year")}-${pick("month")}-${pick("day")}T${pick("hour")}:${pick("minute")}:${pick("second")}`);
+
+  return new Date(
+    `${pick("year")}-${pick("month")}-${pick("day")}T${pick("hour")}:${pick("minute")}:${pick("second")}`,
+  );
 }
 
 export function ymd(date: Date): string {
@@ -65,8 +130,10 @@ export function formatDateLong(dateStr: string): string {
 export function extractTime(raw: string): string | undefined {
   const m = raw.match(/\b(\d{1,2})(?::|h)?(\d{2})?\b/);
   if (!m) return undefined;
+
   const hh = Number(m[1]);
   const mm = Number(m[2] ?? 0);
+
   if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return undefined;
   return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
 }
@@ -79,16 +146,19 @@ export function resolveDateFromText(raw: string, allowPast = false): string | un
   today.setHours(12, 0, 0, 0);
 
   if (/\bhoje\b/.test(input)) return ymd(today);
+
   if (/\bontem\b/.test(input)) {
     const d = new Date(today);
     d.setDate(d.getDate() - 1);
     return allowPast ? ymd(d) : undefined;
   }
+
   if (/\bdepois de amanha\b|\bdepois de amanhã\b/.test(input)) {
     const d = new Date(today);
     d.setDate(d.getDate() + 2);
     return ymd(d);
   }
+
   if (/\bamanha\b|\bamanhã\b/.test(input)) {
     const d = new Date(today);
     d.setDate(d.getDate() + 1);
@@ -103,7 +173,9 @@ export function resolveDateFromText(raw: string, allowPast = false): string | un
     const day = Number(br[1]);
     const month = Number(br[2]);
     let year = Number(br[3] ?? today.getFullYear());
+
     if (year < 100) year += 2000;
+
     if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
       const d = new Date(year, month - 1, day, 12, 0, 0);
       return ymd(d);
@@ -114,10 +186,13 @@ export function resolveDateFromText(raw: string, allowPast = false): string | un
   for (const key of keys) {
     const rx = new RegExp(`\\b${escapeRegex(key)}\\b`, "i");
     if (!rx.test(input)) continue;
+
     const target = WEEKDAY_SHORT[key];
     const current = today.getDay();
     let diff = target - current;
+
     if (diff <= 0) diff += 7;
+
     const d = new Date(today);
     d.setDate(d.getDate() + diff);
     return ymd(d);
@@ -130,38 +205,43 @@ export function isPastDate(dateStr: string): boolean {
   return dateStr < ymd(getLocalNow());
 }
 
+function cleanClientCandidate(input: string): string | undefined {
+  if (!input) return undefined;
+
+  let text = normalizar(input);
+
+  text = text.replace(/\b(20\d{2}-\d{2}-\d{2})\b/g, " ");
+  text = text.replace(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/g, " ");
+  text = text.replace(/\b\d{1,2}(?::|h)?\d{0,2}\b/g, " ");
+  text = text.replace(/[.,;!?()[\]{}"'`´“”]/g, " ");
+  text = text.replace(/\s+/g, " ").trim();
+
+  if (!text) return undefined;
+
+  const tokens = text
+    .split(" ")
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .filter((token) => !NON_NAME_WORDS.has(token))
+    .filter((token) => !/^\d+$/.test(token));
+
+  if (!tokens.length) return undefined;
+
+  const candidate = tokens.slice(0, 4).join(" ").trim();
+
+  if (!candidate || candidate.length < 2) return undefined;
+  return candidate;
+}
+
 export function extractLikelyClientTerm(msg: string): string | undefined {
-  const raw = msg.trim();
-  const after = raw.match(/(?:cliente|pra|para|da|do)\s+([A-ZÀ-Ú][\wÀ-ÿ'’-]+(?:\s+[A-ZÀ-Ú][\wÀ-ÿ'’-]+){0,3})/);
-  if (after?.[1]) return after[1].trim();
+  const raw = msg.trim().replace(/\s+/g, " ");
+  if (!raw) return undefined;
 
-  const capitals = raw.match(/\b([A-ZÀ-Ú][\wÀ-ÿ'’-]+(?:\s+[A-ZÀ-Ú][\wÀ-ÿ'’-]+){0,3})\b/g);
-  if (capitals?.length) return capitals[0].trim();
-  return undefined;
-}
+  const quoted = raw.match(/["“”'`](.{2,60})["“”'`]/);
+  if (quoted?.[1]) {
+    const candidate = cleanClientCandidate(quoted[1]);
+    if (candidate) return candidate;
+  }
 
-export function detectIntent(msg: string): AgentIntent {
-  const n = normalizar(msg);
-  if (/(remarcar|remarca|reagendar|reagenda|mover horario|mudar horario)/.test(n)) return "reschedule";
-  if (/(cancelar agendamento|cancelar horario|desmarcar|cancela a agenda|cancelar a agenda)/.test(n)) return "cancel";
-  if (/(cadastrar cliente|criar cliente|novo cliente|cadastro de cliente)/.test(n)) return "create_client";
-  if (/(quais agendamentos|agenda de hoje|agenda de amanha|agenda de amanhã|como esta a agenda|como está a agenda|listar agenda|lista da agenda|agendamentos de hoje|agendamentos de amanha|agendamentos de amanhã)/.test(n)) return "query_schedule";
-  if (/(livres|disponiveis|disponíveis|equipe livre|funcionarios livres|funcionários livres)/.test(n)) return "query_available";
-  if (/(faturamento|caixa|receita|entrou|financeiro)/.test(n)) return "query_finance";
-  if (/(buscar cliente|telefone do cliente|cpf do cliente|email do cliente|dados do cliente)/.test(n)) return "query_client";
-  if (/(agendar|novo agendamento|marcar horario|marcar horário|marcar|agenda|encaixar|encaixe)/.test(n)) return "schedule";
-  return "unknown";
-}
-
-export function interpretMessage(msg: string): AgentInterpretation {
-  const normalized = normalizar(msg);
-  return {
-    intent: detectIntent(msg),
-    raw: msg,
-    normalized,
-    date: resolveDateFromText(msg, false),
-    time: extractTime(msg),
-    clientHint: extractLikelyClientTerm(msg),
-    explicitCreateClient: /(cadastrar cliente|criar cliente|pode cadastrar|cadastre o cliente)/.test(normalized),
-  };
-}
+  const patterns = [
+    /(?:cliente|pra|para|da|do
