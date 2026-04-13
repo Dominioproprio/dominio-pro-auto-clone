@@ -64,6 +64,33 @@ const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
 const HISTORY_LIMIT = 20;
 const TZ = "America/Sao_Paulo";
 
+
+async function ensureBaseLoaded(): Promise<void> {
+  await Promise.allSettled([
+    clientsStore.ensureLoaded(),
+    Promise.resolve(
+      servicesStore.list(true).length
+        ? servicesStore.list(true)
+        : servicesStore.fetchAll(),
+    ),
+    Promise.resolve(
+      employeesStore.list(true).length
+        ? employeesStore.list(true)
+        : employeesStore.fetchAll(),
+    ),
+    Promise.resolve(
+      appointmentsStore.list().length
+        ? appointmentsStore.list()
+        : appointmentsStore.fetchAll(),
+    ),
+    Promise.resolve(
+      cashSessionsStore.list().length
+        ? cashSessionsStore.list()
+        : cashSessionsStore.fetchAll(),
+    ),
+  ]);
+}
+
 function getStorage(): Storage | null {
   return typeof localStorage !== "undefined" ? localStorage : null;
 }
