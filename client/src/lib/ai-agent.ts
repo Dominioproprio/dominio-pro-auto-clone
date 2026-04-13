@@ -24,40 +24,94 @@ export interface ResultadoAgente {
 
 type Intent =
   | "schedule"
-  | "cancel"
-  | "reschedule"
   | "query_schedule"
   | "query_finance"
   | "query_client"
   | "query_available"
+  | "cancel"
+  | "reschedule"
   | "unknown";
+
+type SlotName = "client" | "date" | "time" | "service" | "employee";
 
 interface DraftState {
   flow: "schedule";
   client?: Client;
   clientQuery?: string;
+  clientOptions?: string[];
+
   date?: string;
   time?: string;
+
   service?: Service;
   serviceQuery?: string;
+  serviceOptions?: string[];
+
   employee?: Employee;
   employeeQuery?: string;
+  employeeOptions?: string[];
+
   awaitingConfirmation?: boolean;
   updatedAt: number;
 }
 
-const DRAFT_KEY = "dominio_pro_ai_agent_draft_v2";
+interface LearningSettings {
+  preferCurrentSlotOnShortReply: boolean;
+  preferCorrectionAfterNo: boolean;
+}
+
+interface PendingLearningApproval {
+  key: keyof LearningSettings;
+  prompt: string;
+  createdAt: number;
+}
+
+const DRAFT_KEY = "dominio_pro_ai_agent_schedule_draft_v5";
+const LEARNING_KEY = "dominio_pro_ai_agent_learning_v1";
+const PENDING_LEARNING_KEY = "dominio_pro_ai_agent_pending_learning_v1";
 const TZ = "America/Sao_Paulo";
 
 const YES =
   /^(sim|s|ok|confirmo|confirmar|pode|isso|isso mesmo|pode confirmar|confirmado)[.! ]*$/i;
 
 const NO_ONLY =
-  /^(nao|não|cancelar|cancela|deixa|deixa pra la|deixa pra lá|negativo)[.! ]*$/i;
+  /^(nao|não|negativo|corrigir|corrige|errado|nao mesmo|não mesmo)[.! ]*$/i;
 
-const NO_WITH_TEXT = /^(nao|não)[,.:;! ]+(.+)$/i;
+const NO_WITH_TEXT =
+  /^(nao|não|negativo|corrigir|corrige|errado)[,.:;! ]+(.+)$/i;
 
-const STOPWORDS = new Set([
+const LEARN_YES =
+  /^(sim aprender|aprender sim|sim, aprender|pode aprender|sim, pode aprender)[.! ]*$/i;
+
+const LEARN_NO =
+  /^(nao aprender|não aprender|nao, aprender nao|não, aprender não|nao, obrigado|não, obrigado)[.! ]*$/i;
+
+const WEEKDAY_SHORT: Record<string, number> = {
+  dom: 0,
+  domingo: 0,
+  seg: 1,
+  segunda: 1,
+  "segunda-feira": 1,
+  ter: 2,
+  terca: 2,
+  terça: 2,
+  "terca-feira": 2,
+  "terça-feira": 2,
+  qua: 3,
+  quarta: 3,
+  "quarta-feira": 3,
+  qui: 4,
+  quinta: 4,
+  "quinta-feira": 4,
+  sex: 5,
+  sexta: 5,
+  "sexta-feira": 5,
+  sab: 6,
+  sabado: 6,
+  sábado: 6,
+};
+
+const CORE_STOPWORDS = new Set([
   "quero",
   "preciso",
   "pode",
@@ -94,39 +148,23 @@ const STOPWORDS = new Set([
   "mover",
   "horas",
   "hora",
+  "servico",
+  "serviço",
+  "profissional",
+  "dia",
+  "data",
 ]);
 
-const WEEKDAY_SHORT: Record<string, number> = {
-  dom: 0,
-  domingo: 0,
-  seg: 1,
-  segunda: 1,
-  "segunda-feira": 1,
-  ter: 2,
-  terca: 2,
-  terça: 2,
-  "terca-feira": 2,
-  "terça-feira": 2,
-  qua: 3,
-  quarta: 3,
-  "quarta-feira": 3,
-  qui: 4,
-  quinta: 4,
-  "quinta-feira": 4,
-  sex: 5,
-  sexta: 5,
-  "sexta-feira": 5,
-  sab: 6,
-  sabado: 6,
-  sábado: 6,
-};
-
-function normalizar(s: string): string {
-  return (s || "")
+function normalizar(value: string): string {
+  return (value || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .trim();
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function getStorage(): Storage | null {
@@ -138,11 +176,13 @@ function loadDraft(): DraftState | null {
     const storage = getStorage();
     const raw = storage?.getItem(DRAFT_KEY);
     if (!raw) return null;
+
     const parsed = JSON.parse(raw) as DraftState;
     if (!parsed?.updatedAt || Date.now() - parsed.updatedAt > 30 * 60_000) {
       storage?.removeItem(DRAFT_KEY);
       return null;
     }
+
     return parsed;
   } catch {
     return null;
@@ -152,12 +192,112 @@ function loadDraft(): DraftState | null {
 function saveDraft(draft: DraftState | null): void {
   const storage = getStorage();
   if (!storage) return;
+
   if (!draft) {
     storage.removeItem(DRAFT_KEY);
     return;
   }
+
   draft.updatedAt = Date.now();
   storage.setItem(DRAFT_KEY, JSON.stringify(draft));
+}
+
+function getLearningSettings(): LearningSettings {
+  try {
+    const storage = getStorage();
+    const raw = storage?.getItem(LEARNING_KEY);
+    if (!raw) {
+      return {
+        preferCurrentSlotOnShortReply: false,
+        preferCorrectionAfterNo: false,
+      };
+    }
+
+    const parsed = JSON.parse(raw) as Partial<LearningSettings>;
+    return {
+      preferCurrentSlotOnShortReply: Boolean(parsed.preferCurrentSlotOnShortReply),
+      preferCorrectionAfterNo: Boolean(parsed.preferCorrectionAfterNo),
+    };
+  } catch {
+    return {
+      preferCurrentSlotOnShortReply: false,
+      preferCorrectionAfterNo: false,
+    };
+  }
+}
+
+function saveLearningSettings(settings: LearningSettings): void {
+  const storage = getStorage();
+  if (!storage) return;
+  storage.setItem(LEARNING_KEY, JSON.stringify(settings));
+}
+
+function loadPendingLearning(): PendingLearningApproval | null {
+  try {
+    const storage = getStorage();
+    const raw = storage?.getItem(PENDING_LEARNING_KEY);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as PendingLearningApproval;
+    if (!parsed?.createdAt || Date.now() - parsed.createdAt > 30 * 60_000) {
+      storage?.removeItem(PENDING_LEARNING_KEY);
+      return null;
+    }
+
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function savePendingLearning(value: PendingLearningApproval | null): void {
+  const storage = getStorage();
+  if (!storage) return;
+
+  if (!value) {
+    storage.removeItem(PENDING_LEARNING_KEY);
+    return;
+  }
+
+  storage.setItem(PENDING_LEARNING_KEY, JSON.stringify(value));
+}
+
+function maybeOfferLearning(
+  key: keyof LearningSettings,
+  prompt: string,
+): string {
+  const settings = getLearningSettings();
+  if (settings[key]) return "";
+  savePendingLearning({
+    key,
+    prompt,
+    createdAt: Date.now(),
+  });
+  return `\n\n${prompt} Responda: "sim aprender" ou "não aprender".`;
+}
+
+function handlePendingLearningAnswer(msg: string): ResultadoAgente | null {
+  const pending = loadPendingLearning();
+  if (!pending) return null;
+
+  if (LEARN_YES.test(msg.trim())) {
+    const settings = getLearningSettings();
+    settings[pending.key] = true;
+    saveLearningSettings(settings);
+    savePendingLearning(null);
+    return {
+      texto: "Aprendizado aprovado. Vou usar isso como referência futura sem quebrar as regras do sistema.",
+    };
+  }
+
+  if (LEARN_NO.test(msg.trim())) {
+    savePendingLearning(null);
+    return {
+      texto: "Certo. Corrijo o caso atual quando necessário, mas não vou usar isso como referência futura.",
+    };
+  }
+
+  return null;
 }
 
 function getLocalNow(): Date {
@@ -203,8 +343,99 @@ function formatDateLong(dateStr: string): string {
   });
 }
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function timeToMinutes(value: string): number {
+  const [h, m] = value.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function detectIntent(msg: string): Intent {
+  const n = normalizar(msg);
+
+  if (
+    /(agenda de hoje|agenda de amanha|agenda de amanhã|agendamentos|lista da agenda|agenda hoje)/.test(
+      n,
+    )
+  ) {
+    return "query_schedule";
+  }
+
+  if (/(faturamento|caixa|receita|financeiro)/.test(n)) {
+    return "query_finance";
+  }
+
+  if (/(buscar cliente|dados do cliente|telefone do cliente|email do cliente)/.test(n)) {
+    return "query_client";
+  }
+
+  if (/(disponiveis|disponíveis|livres|quem esta livre|quem está livre)/.test(n)) {
+    return "query_available";
+  }
+
+  if (
+    /(cancelar agendamento|cancelar horario|cancelar horário|desmarcar|cancelar)/.test(
+      n,
+    )
+  ) {
+    return "cancel";
+  }
+
+  if (
+    /(remarcar|remarca|reagendar|reagenda|mudar horario|mudar horário|mover horario|mover horário|mover agendamento)/.test(
+      n,
+    )
+  ) {
+    return "reschedule";
+  }
+
+  if (/(agendar|marcar|novo agendamento|encaixar|encaixe)/.test(n)) {
+    return "schedule";
+  }
+
+  return "unknown";
+}
+
+async function ensureBaseLoaded(): Promise<void> {
+  await Promise.allSettled([
+    clientsStore.ensureLoaded(),
+    Promise.resolve(servicesStore.list(true).length || servicesStore.fetchAll()),
+    Promise.resolve(employeesStore.list(true).length || employeesStore.fetchAll()),
+    Promise.resolve(appointmentsStore.list().length || appointmentsStore.fetchAll()),
+    Promise.resolve(cashSessionsStore.list().length || cashSessionsStore.fetchAll()),
+  ]);
+}
+
+function tokenize(value: string): string[] {
+  return normalizar(value)
+    .replace(/[.,;!?()[\]{}"'`´“”]/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function scoreByTokens(haystack: string, candidate: string): number {
+  const h = normalizar(haystack);
+  const c = normalizar(candidate);
+
+  if (!c) return 0;
+  if (h === c) return 1;
+  if (h.includes(c)) return 0.93;
+
+  const tokens = c.split(/\s+/).filter(Boolean);
+  if (!tokens.length) return 0;
+
+  const hits = tokens.filter((token) => h.includes(token)).length;
+  if (!hits) return 0;
+
+  const ratio = hits / tokens.length;
+  return ratio >= 1 ? 0.88 : ratio * 0.8;
+}
+
+function getActiveServices(): Service[] {
+  return servicesStore.list(true).filter((service) => service.active);
+}
+
+function getActiveEmployees(): Employee[] {
+  return employeesStore.list(true).filter((employee) => employee.active);
 }
 
 function extractTime(raw: string): string | undefined {
@@ -290,119 +521,74 @@ function isPastDate(dateStr: string): boolean {
   return dateStr < ymd(getLocalNow());
 }
 
-function timeToMinutes(t: string): number {
-  const [h, m] = t.split(":").map(Number);
-  return h * 60 + m;
-}
+function extractStructuredField(
+  text: string,
+  labels: string[],
+  stopLabels: string[],
+): string | undefined {
+  const cleanText = text.replace(/\n/g, " ");
+  const stopPattern = stopLabels.map((item) => escapeRegex(item)).join("|");
 
-function detectIntent(msg: string): Intent {
-  const n = normalizar(msg);
+  for (const label of labels) {
+    const rx = new RegExp(
+      `(?:^|\\b)${escapeRegex(label)}\\b\\s*[:=-]?\\s*(.+?)(?=(?:\\b(?:${stopPattern})\\b\\s*[:=-]?|$))`,
+      "i",
+    );
 
-  if (
-    /(remarcar|remarca|reagendar|reagenda|mudar horario|mudar horário|mover horario|mover horário|mover agendamento)/.test(
-      n,
-    )
-  ) {
-    return "reschedule";
+    const match = cleanText.match(rx);
+    const value = match?.[1]?.trim();
+    if (value) return value;
   }
 
-  if (
-    /(cancelar agendamento|cancelar horario|cancelar horário|desmarcar|cancelar)/.test(
-      n,
-    )
-  ) {
-    return "cancel";
-  }
-
-  if (
-    /(agenda de hoje|agenda de amanha|agenda de amanhã|agendamentos|lista da agenda|agenda hoje)/.test(
-      n,
-    )
-  ) {
-    return "query_schedule";
-  }
-
-  if (/(faturamento|caixa|receita|financeiro)/.test(n)) {
-    return "query_finance";
-  }
-
-  if (/(buscar cliente|dados do cliente|telefone do cliente|email do cliente)/.test(n)) {
-    return "query_client";
-  }
-
-  if (/(disponiveis|disponíveis|livres|quem esta livre|quem está livre)/.test(n)) {
-    return "query_available";
-  }
-
-  if (/(agendar|marcar|novo agendamento|encaixar|encaixe)/.test(n)) {
-    return "schedule";
-  }
-
-  return "unknown";
+  return undefined;
 }
 
-async function ensureBaseLoaded(): Promise<void> {
-  await Promise.allSettled([
-    clientsStore.ensureLoaded(),
-    Promise.resolve(
-      servicesStore.list(true).length || servicesStore.fetchAll(),
-    ),
-    Promise.resolve(
-      employeesStore.list(true).length || employeesStore.fetchAll(),
-    ),
-    Promise.resolve(
-      appointmentsStore.list().length || appointmentsStore.fetchAll(),
-    ),
-    Promise.resolve(
-      cashSessionsStore.list().length || cashSessionsStore.fetchAll(),
-    ),
-  ]);
+function isLikelyFullSentence(text: string): boolean {
+  const n = normalizar(text);
+  return (
+    /(agendar|marcar|cliente|servico|serviço|profissional|com|amanha|amanhã|hoje)/.test(n) ||
+    /\b\d{1,2}(?::|h)?\d{0,2}\b/.test(n)
+  );
 }
 
-function tokenizeText(value: string): string[] {
-  return normalizar(value)
-    .replace(/[.,;!?()[\]{}"'`´“”]/g, " ")
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter(Boolean);
+function stripForClientCandidate(text: string): string {
+  let out = normalizar(text);
+
+  for (const service of getActiveServices()) {
+    const rx = new RegExp(`\\b${escapeRegex(normalizar(service.name))}\\b`, "gi");
+    out = out.replace(rx, " ");
+  }
+
+  for (const employee of getActiveEmployees()) {
+    const rx = new RegExp(`\\b${escapeRegex(normalizar(employee.name))}\\b`, "gi");
+    out = out.replace(rx, " ");
+  }
+
+  out = out.replace(/\bcom\s+[a-zà-ÿ]+(?:\s+[a-zà-ÿ]+){0,2}\b/gi, " ");
+  out = out.replace(/\b\d{1,2}(?::|h)?\d{0,2}\b/g, " ");
+  out = out.replace(/\b(20\d{2})-(\d{2})-(\d{2})\b/g, " ");
+  out = out.replace(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/g, " ");
+
+  const weekdayKeys = Object.keys(WEEKDAY_SHORT).sort((a, b) => b.length - a.length);
+  for (const key of weekdayKeys) {
+    const rx = new RegExp(`\\b${escapeRegex(normalizar(key))}\\b`, "gi");
+    out = out.replace(rx, " ");
+  }
+
+  const tokens = tokenize(out).filter((token) => !CORE_STOPWORDS.has(token));
+  return tokens.slice(0, 4).join(" ").trim();
 }
 
-function scoreByTokens(haystack: string, candidate: string): number {
-  const h = normalizar(haystack);
-  const c = normalizar(candidate);
-
-  if (!c) return 0;
-  if (h === c) return 1;
-  if (h.includes(c)) return 0.92;
-
-  const tokens = c.split(/\s+/).filter(Boolean);
-  if (!tokens.length) return 0;
-
-  const hits = tokens.filter((token) => h.includes(token)).length;
-  if (!hits) return 0;
-
-  const ratio = hits / tokens.length;
-  return ratio >= 1 ? 0.88 : ratio * 0.8;
-}
-
-function getActiveServices(): Service[] {
-  return servicesStore.list(true).filter((service) => service.active);
-}
-
-function getActiveEmployees(): Employee[] {
-  return employeesStore.list(true).filter((employee) => employee.active);
-}
-
-function resolveBestService(msg: string): {
+function resolveBestService(text: string): {
   service?: Service;
   ambiguous?: string[];
 } {
-  const services = getActiveServices();
+  const base = getActiveServices();
 
-  const scored = services
+  const scored = base
     .map((service) => ({
       service,
-      score: scoreByTokens(msg, service.name),
+      score: scoreByTokens(text, service.name),
     }))
     .filter((item) => item.score >= 0.72)
     .sort(
@@ -421,25 +607,29 @@ function resolveBestService(msg: string): {
     return { service: top.service };
   }
 
-  const normalizedMsg = normalizar(msg);
+  const normalizedText = normalizar(text);
   const exact = scored.filter((item) =>
-    normalizedMsg.includes(normalizar(item.service.name)),
+    normalizedText.includes(normalizar(item.service.name)),
   );
-  if (exact.length === 1) return { service: exact[0].service };
+  if (exact.length === 1) {
+    return { service: exact[0].service };
+  }
 
-  return { ambiguous: scored.slice(0, 5).map((item) => item.service.name) };
+  return {
+    ambiguous: scored.slice(0, 5).map((item) => item.service.name),
+  };
 }
 
-function resolveBestEmployee(msg: string): {
+function resolveBestEmployee(text: string): {
   employee?: Employee;
   ambiguous?: string[];
 } {
-  const employees = getActiveEmployees();
+  const base = getActiveEmployees();
 
-  const scored = employees
+  const scored = base
     .map((employee) => ({
       employee,
-      score: scoreByTokens(msg, employee.name),
+      score: scoreByTokens(text, employee.name),
     }))
     .filter((item) => item.score >= 0.72)
     .sort(
@@ -458,82 +648,34 @@ function resolveBestEmployee(msg: string): {
     return { employee: top.employee };
   }
 
-  const normalizedMsg = normalizar(msg);
+  const normalizedText = normalizar(text);
   const exact = scored.filter((item) =>
-    normalizedMsg.includes(normalizar(item.employee.name)),
+    normalizedText.includes(normalizar(item.employee.name)),
   );
-  if (exact.length === 1) return { employee: exact[0].employee };
+  if (exact.length === 1) {
+    return { employee: exact[0].employee };
+  }
 
   return {
     ambiguous: scored.slice(0, 5).map((item) => item.employee.name),
   };
 }
 
-function stripKnownEntities(
-  msg: string,
-  service?: Service,
-  employee?: Employee,
-): string {
-  let text = normalizar(msg);
-
-  const replacements = [
-    service?.name,
-    employee?.name,
-    "quero",
-    "preciso",
-    "agendar",
-    "marcar",
-    "novo agendamento",
-    "encaixar",
-    "encaixe",
-    "com",
-    "para",
-    "pra",
-    "amanha",
-    "amanhã",
-    "hoje",
-    "depois de amanha",
-    "depois de amanhã",
-  ].filter(Boolean) as string[];
-
-  for (const part of replacements) {
-    const rx = new RegExp(`\\b${escapeRegex(normalizar(part))}\\b`, "gi");
-    text = text.replace(rx, " ");
-  }
-
-  text = text.replace(/\b\d{1,2}(?::|h)?\d{0,2}\b/g, " ");
-  text = text.replace(/\b(20\d{2})-(\d{2})-(\d{2})\b/g, " ");
-  text = text.replace(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/g, " ");
-
-  const weekdayKeys = Object.keys(WEEKDAY_SHORT).sort((a, b) => b.length - a.length);
-  for (const key of weekdayKeys) {
-    const rx = new RegExp(`\\b${escapeRegex(normalizar(key))}\\b`, "gi");
-    text = text.replace(rx, " ");
-  }
-
-  const cleaned = tokenizeText(text).filter((token) => !STOPWORDS.has(token));
-  return cleaned.join(" ").trim();
-}
-
-async function resolveBestClient(
-  msg: string,
-  service?: Service,
-  employee?: Employee,
-): Promise<{
+async function resolveBestClient(text: string): Promise<{
   client?: Client;
-  ambiguous?: string[];
   query?: string;
+  ambiguous?: string[];
 }> {
-  const explicitQuoted = msg.match(/[\"“”'`](.{2,60})[\"“”'`]/)?.[1]?.trim();
+  const explicit = extractStructuredField(
+    text,
+    ["cliente", "nome do cliente"],
+    ["servico", "serviço", "horario", "horário", "data", "dia", "profissional", "com"],
+  );
 
-  const directCandidate = explicitQuoted
-    ? normalizar(explicitQuoted)
-    : stripKnownEntities(msg, service, employee);
-
-  const candidate = directCandidate.trim();
+  const candidate = explicit ? normalizar(explicit) : stripForClientCandidate(text);
   if (!candidate || candidate.length < 2) return {};
 
-  const found = await clientsStore.search(candidate, { limit: 10 });
+  const found = await clientsStore.search(candidate, { limit: 8 });
   if (!found.length) return { query: candidate };
 
   const scored = found
@@ -554,7 +696,7 @@ async function resolveBestClient(
     return { client: top.client, query: candidate };
   }
 
-  if (top.score >= 0.94 && (second?.score ?? 0) <= 0.72) {
+  if (top.score >= 0.94 && (second?.score ?? 0) <= 0.74) {
     return { client: top.client, query: candidate };
   }
 
@@ -563,15 +705,300 @@ async function resolveBestClient(
   }
 
   return {
-    ambiguous: scored.slice(0, 5).map((item) => item.client.name),
     query: candidate,
+    ambiguous: scored.slice(0, 5).map((item) => item.client.name),
   };
 }
 
+function getCurrentMissingSlot(draft: DraftState): SlotName | null {
+  if (!draft.client) return "client";
+  if (!draft.date) return "date";
+  if (!draft.time) return "time";
+  if (!draft.service) return "service";
+  if (!draft.employee) return "employee";
+  return null;
+}
+
+function clearSlot(draft: DraftState, slot: SlotName): void {
+  if (slot === "client") {
+    draft.client = undefined;
+    draft.clientQuery = undefined;
+    draft.clientOptions = undefined;
+  }
+  if (slot === "date") {
+    draft.date = undefined;
+  }
+  if (slot === "time") {
+    draft.time = undefined;
+  }
+  if (slot === "service") {
+    draft.service = undefined;
+    draft.serviceQuery = undefined;
+    draft.serviceOptions = undefined;
+  }
+  if (slot === "employee") {
+    draft.employee = undefined;
+    draft.employeeQuery = undefined;
+    draft.employeeOptions = undefined;
+  }
+}
+
+function summarizeDraft(draft: DraftState): string {
+  return [
+    `Cliente: ${draft.client?.name ?? "—"}`,
+    `Data: ${draft.date ? formatDateLong(draft.date) : "—"}`,
+    `Horário: ${draft.time ?? "—"}`,
+    `Serviço: ${draft.service?.name ?? "—"}`,
+    `Profissional: ${draft.employee?.name ?? "—"}`,
+  ].join("\n");
+}
+
+function nextQuestion(draft: DraftState): string {
+  const missing = getCurrentMissingSlot(draft);
+
+  if (missing === "client") {
+    if (draft.clientOptions?.length) {
+      return `Encontrei mais de um cliente parecido. Digite o nome completo.\n- ${draft.clientOptions.join("\n- ")}`;
+    }
+    if (draft.clientQuery) {
+      return `Não encontrei o cliente "${draft.clientQuery}" no cadastro real. Qual é o cliente?`;
+    }
+    return "Qual é o cliente?";
+  }
+
+  if (missing === "date") return "Qual é a data?";
+  if (missing === "time") return "Qual é o horário?";
+
+  if (missing === "service") {
+    if (draft.serviceOptions?.length) {
+      return `Encontrei mais de um serviço parecido. Digite o nome completo do serviço.\n- ${draft.serviceOptions.join("\n- ")}`;
+    }
+    if (draft.serviceQuery) {
+      return `Não identifiquei o serviço "${draft.serviceQuery}". Qual é o serviço?`;
+    }
+    return "Qual é o serviço?";
+  }
+
+  if (missing === "employee") {
+    if (draft.employeeOptions?.length) {
+      return `Encontrei mais de um profissional parecido. Digite o nome completo do profissional.\n- ${draft.employeeOptions.join("\n- ")}`;
+    }
+    if (draft.employeeQuery) {
+      return `Não identifiquei o profissional "${draft.employeeQuery}". Qual é o profissional?`;
+    }
+    return "Qual é o profissional?";
+  }
+
+  return `Confirma?\n${summarizeDraft(draft)}`;
+}
+
+async function fillClientOnly(
+  draft: DraftState,
+  text: string,
+): Promise<string | null> {
+  const resolution = await resolveBestClient(text);
+
+  if (resolution.client) {
+    draft.client = resolution.client;
+    draft.clientQuery = undefined;
+    draft.clientOptions = undefined;
+    return null;
+  }
+
+  if (resolution.ambiguous?.length) {
+    draft.clientQuery = resolution.query;
+    draft.clientOptions = resolution.ambiguous;
+    return `Encontrei mais de um cliente parecido. Digite o nome completo.\n- ${resolution.ambiguous.join("\n- ")}`;
+  }
+
+  if (resolution.query) {
+    draft.clientQuery = resolution.query;
+    return `Não encontrei o cliente "${resolution.query}" no cadastro real. Qual é o cliente?`;
+  }
+
+  return "Qual é o cliente?";
+}
+
+function fillDateOnly(draft: DraftState, text: string): string | null {
+  const date = resolveDateFromText(text, false);
+  if (!date) return "Qual é a data?";
+  if (isPastDate(date)) return "Não posso agendar em data passada. Qual é a data?";
+  draft.date = date;
+  return null;
+}
+
+function fillTimeOnly(draft: DraftState, text: string): string | null {
+  const time = extractTime(text);
+  if (!time) return "Qual é o horário?";
+  draft.time = time;
+  return null;
+}
+
+function fillServiceOnly(draft: DraftState, text: string): string | null {
+  const resolution = resolveBestService(text);
+
+  if (resolution.service) {
+    draft.service = resolution.service;
+    draft.serviceQuery = undefined;
+    draft.serviceOptions = undefined;
+    return null;
+  }
+
+  if (resolution.ambiguous?.length) {
+    draft.serviceQuery = text.trim();
+    draft.serviceOptions = resolution.ambiguous;
+    return `Encontrei mais de um serviço parecido. Digite o nome completo do serviço.\n- ${resolution.ambiguous.join("\n- ")}`;
+  }
+
+  draft.serviceQuery = text.trim();
+  return "Qual é o serviço?";
+}
+
+function fillEmployeeOnly(draft: DraftState, text: string): string | null {
+  const resolution = resolveBestEmployee(text);
+
+  if (resolution.employee) {
+    draft.employee = resolution.employee;
+    draft.employeeQuery = undefined;
+    draft.employeeOptions = undefined;
+    return null;
+  }
+
+  if (resolution.ambiguous?.length) {
+    draft.employeeQuery = text.trim();
+    draft.employeeOptions = resolution.ambiguous;
+    return `Encontrei mais de um profissional parecido. Digite o nome completo do profissional.\n- ${resolution.ambiguous.join("\n- ")}`;
+  }
+
+  draft.employeeQuery = text.trim();
+  return "Qual é o profissional?";
+}
+
+async function fillCurrentMissingSlot(
+  draft: DraftState,
+  text: string,
+): Promise<string | null> {
+  const missing = getCurrentMissingSlot(draft);
+  if (!missing) return null;
+
+  const n = normalizar(text);
+  if (YES.test(text) || NO_ONLY.test(text) || n === "ok") {
+    return nextQuestion(draft);
+  }
+
+  if (missing === "client") return fillClientOnly(draft, text);
+  if (missing === "date") return fillDateOnly(draft, text);
+  if (missing === "time") return fillTimeOnly(draft, text);
+  if (missing === "service") return fillServiceOnly(draft, text);
+  return fillEmployeeOnly(draft, text);
+}
+
+async function applyExtraction(
+  draft: DraftState,
+  text: string,
+  allowOverride: boolean,
+): Promise<string | null> {
+  const explicitClient = extractStructuredField(
+    text,
+    ["cliente", "nome do cliente"],
+    ["servico", "serviço", "horario", "horário", "data", "dia", "profissional", "com"],
+  );
+
+  const explicitService = extractStructuredField(
+    text,
+    ["servico", "serviço"],
+    ["cliente", "horario", "horário", "data", "dia", "profissional", "com"],
+  );
+
+  const explicitEmployee = extractStructuredField(
+    text,
+    ["profissional", "com"],
+    ["cliente", "servico", "serviço", "horario", "horário", "data", "dia"],
+  );
+
+  const explicitDate = extractStructuredField(
+    text,
+    ["data", "dia"],
+    ["cliente", "servico", "serviço", "horario", "horário", "profissional", "com"],
+  );
+
+  const explicitTime = extractStructuredField(
+    text,
+    ["horario", "horário"],
+    ["cliente", "servico", "serviço", "data", "dia", "profissional", "com"],
+  );
+
+  if (explicitClient && (!draft.client || allowOverride)) {
+    clearSlot(draft, "client");
+    const error = await fillClientOnly(draft, explicitClient);
+    if (error) return error;
+  } else if (!draft.client && isLikelyFullSentence(text)) {
+    const resolution = await resolveBestClient(text);
+    if (resolution.client) {
+      draft.client = resolution.client;
+      draft.clientQuery = undefined;
+      draft.clientOptions = undefined;
+    } else if (resolution.ambiguous?.length) {
+      draft.clientQuery = resolution.query;
+      draft.clientOptions = resolution.ambiguous;
+    } else if (resolution.query) {
+      draft.clientQuery = resolution.query;
+    }
+  }
+
+  if (explicitDate && (!draft.date || allowOverride)) {
+    const error = fillDateOnly(draft, explicitDate);
+    if (error) return error;
+  } else if (!draft.date && isLikelyFullSentence(text)) {
+    const date = resolveDateFromText(text, false);
+    if (date && !isPastDate(date)) draft.date = date;
+  }
+
+  if (explicitTime && (!draft.time || allowOverride)) {
+    const error = fillTimeOnly(draft, explicitTime);
+    if (error) return error;
+  } else if (!draft.time && isLikelyFullSentence(text)) {
+    const time = extractTime(text);
+    if (time) draft.time = time;
+  }
+
+  if (explicitService && (!draft.service || allowOverride)) {
+    clearSlot(draft, "service");
+    const error = fillServiceOnly(draft, explicitService);
+    if (error) return error;
+  } else if (!draft.service && isLikelyFullSentence(text)) {
+    const resolution = resolveBestService(text);
+    if (resolution.service) {
+      draft.service = resolution.service;
+      draft.serviceQuery = undefined;
+      draft.serviceOptions = undefined;
+    } else if (resolution.ambiguous?.length) {
+      draft.serviceQuery = text.trim();
+      draft.serviceOptions = resolution.ambiguous;
+    }
+  }
+
+  if (explicitEmployee && (!draft.employee || allowOverride)) {
+    clearSlot(draft, "employee");
+    const error = fillEmployeeOnly(draft, explicitEmployee);
+    if (error) return error;
+  } else if (!draft.employee && isLikelyFullSentence(text)) {
+    const resolution = resolveBestEmployee(text);
+    if (resolution.employee) {
+      draft.employee = resolution.employee;
+      draft.employeeQuery = undefined;
+      draft.employeeOptions = undefined;
+    } else if (resolution.ambiguous?.length) {
+      draft.employeeQuery = text.trim();
+      draft.employeeOptions = resolution.ambiguous;
+    }
+  }
+
+  return null;
+}
+
 function getWeekdayKey(dateStr: string): string {
-  return ["dom", "seg", "ter", "qua", "qui", "sex", "sab"][
-    parseYMD(dateStr).getDay()
-  ]!;
+  return ["dom", "seg", "ter", "qua", "qui", "sex", "sab"][parseYMD(dateStr).getDay()]!;
 }
 
 function isWithinWorkingHours(
@@ -594,7 +1021,6 @@ function isEmployeeCompatible(employee: Employee, service: Service): boolean {
   if (!employee.specialties?.length) return true;
 
   const serviceName = normalizar(service.name);
-
   return employee.specialties.some((specialty) => {
     const s = normalizar(specialty);
     return serviceName.includes(s) || s.includes(serviceName);
@@ -644,100 +1070,47 @@ function hasConflict(draft: DraftState): boolean {
     .list({ date: draft.date, employeeId: draft.employee!.id })
     .some((appointment) => {
       if (appointment.status === "cancelled") return false;
-
-      const appointmentStart = new Date(appointment.startTime).getTime();
-      const appointmentEnd = new Date(appointment.endTime).getTime();
-
-      return start < appointmentEnd && end > appointmentStart;
+      const aStart = new Date(appointment.startTime).getTime();
+      const aEnd = new Date(appointment.endTime).getTime();
+      return start < aEnd && end > aStart;
     });
 }
 
-function summarizeDraft(draft: DraftState): string {
-  return [
-    `Cliente: ${draft.client?.name ?? "—"}`,
-    `Data: ${draft.date ? formatDateLong(draft.date) : "—"}`,
-    `Horário: ${draft.time ?? "—"}`,
-    `Serviço: ${draft.service?.name ?? "—"}`,
-    `Profissional: ${draft.employee?.name ?? "—"}`,
-  ].join("\n");
-}
-
-function nextQuestion(draft: DraftState): string {
-  if (!draft.client) {
-    return draft.clientQuery
-      ? `Não encontrei o cliente "${draft.clientQuery}" no cadastro real. Qual é o cliente?`
-      : "Qual é o cliente?";
+async function validateAndMaybeConfirm(draft: DraftState): Promise<ResultadoAgente | null> {
+  if (!draft.client || !draft.date || !draft.time || !draft.service || !draft.employee) {
+    return null;
   }
 
-  if (!draft.date) return "Qual é a data?";
-  if (!draft.time) return "Qual é o horário?";
-
-  if (!draft.service) {
-    return draft.serviceQuery
-      ? `Não identifiquei o serviço "${draft.serviceQuery}". Qual é o serviço?`
-      : "Qual é o serviço?";
+  if (!isEmployeeCompatible(draft.employee, draft.service)) {
+    clearSlot(draft, "employee");
+    saveDraft(draft);
+    return {
+      texto: `O serviço ${draft.service.name} não está compatível com esse profissional. Qual é o profissional?`,
+    };
   }
 
-  if (!draft.employee) {
-    return draft.employeeQuery
-      ? `Não identifiquei o profissional "${draft.employeeQuery}". Qual é o profissional?`
-      : "Qual é o profissional?";
+  const endMinutes = timeToMinutes(draft.time) + draft.service.durationMinutes;
+  const endTime = `${String(Math.floor(endMinutes / 60)).padStart(2, "0")}:${String(
+    endMinutes % 60,
+  ).padStart(2, "0")}`;
+
+  if (!isWithinWorkingHours(draft.employee, draft.date, draft.time, endTime)) {
+    clearSlot(draft, "time");
+    saveDraft(draft);
+    return {
+      texto: `${draft.employee.name} não atende nesse horário. Qual é o horário?`,
+    };
   }
 
-  return `Confirma?\n${summarizeDraft(draft)}`;
-}
-
-async function applyExtractedEntities(
-  draft: DraftState,
-  msg: string,
-  allowOverride = false,
-): Promise<DraftState> {
-  const date = resolveDateFromText(msg, false);
-  const time = extractTime(msg);
-  const serviceResolution = resolveBestService(msg);
-  const employeeResolution = resolveBestEmployee(msg);
-  const clientResolution = await resolveBestClient(
-    msg,
-    serviceResolution.service,
-    employeeResolution.employee,
-  );
-
-  if (clientResolution.client && (!draft.client || allowOverride)) {
-    draft.client = clientResolution.client;
-    draft.clientQuery = undefined;
-  } else if (clientResolution.ambiguous?.length && !draft.client) {
-    draft.clientQuery = clientResolution.query;
-  } else if (clientResolution.query && !draft.client) {
-    draft.clientQuery = clientResolution.query;
+  if (hasConflict(draft)) {
+    clearSlot(draft, "time");
+    saveDraft(draft);
+    return { texto: "Há conflito nesse horário. Qual é o horário?" };
   }
 
-  if (date && (!draft.date || allowOverride)) {
-    draft.date = date;
-  }
-
-  if (time && (!draft.time || allowOverride)) {
-    draft.time = time;
-  }
-
-  if (serviceResolution.service && (!draft.service || allowOverride)) {
-    draft.service = serviceResolution.service;
-    draft.serviceQuery = undefined;
-  } else if (serviceResolution.ambiguous?.length && !draft.service) {
-    draft.serviceQuery = msg.trim();
-  }
-
-  if (employeeResolution.employee && (!draft.employee || allowOverride)) {
-    draft.employee = employeeResolution.employee;
-    draft.employeeQuery = undefined;
-  } else if (employeeResolution.ambiguous?.length && !draft.employee) {
-    draft.employeeQuery = msg.trim();
-  }
-
-  return draft;
-}
-
-function buildAmbiguityPrompt(label: string, options: string[]): string {
-  return `Encontrei mais de um ${label} parecido. Qual é o correto?\n- ${options.join("\n- ")}`;
+  draft.awaitingConfirmation = true;
+  saveDraft(draft);
+  return { texto: `Confirma?\n${summarizeDraft(draft)}` };
 }
 
 async function handleScheduleFlow(msg: string): Promise<ResultadoAgente> {
@@ -745,6 +1118,8 @@ async function handleScheduleFlow(msg: string): Promise<ResultadoAgente> {
 
   const trimmed = msg.trim();
   const normalized = normalizar(trimmed);
+  const learning = getLearningSettings();
+
   let draft =
     loadDraft() ??
     ({
@@ -755,156 +1130,121 @@ async function handleScheduleFlow(msg: string): Promise<ResultadoAgente> {
   if (
     /\be\b/.test(normalized) &&
     /( e |,)/.test(normalized) &&
-    /(corte|escova|hidr|sobrancelha|unha|servico|serviço)/.test(normalized)
+    /(corte|escova|hidr|hidrat|sobrancelha|unha|servico|serviço)/.test(normalized)
   ) {
     return {
-      texto:
-        "Serviço múltiplo ainda não está fechado. Me passe um serviço por vez.",
+      texto: "Serviço múltiplo ainda não está fechado. Me passe um serviço por vez.",
     };
   }
 
   if (draft.awaitingConfirmation) {
     if (YES.test(trimmed)) {
-      if (
-        !draft.client ||
-        !draft.date ||
-        !draft.time ||
-        !draft.service ||
-        !draft.employee
-      ) {
+      if (!draft.client || !draft.date || !draft.time || !draft.service || !draft.employee) {
         draft.awaitingConfirmation = false;
         saveDraft(draft);
         return { texto: nextQuestion(draft) };
       }
 
-      if (!isEmployeeCompatible(draft.employee, draft.service)) {
-        draft.awaitingConfirmation = false;
-        draft.employee = undefined;
-        saveDraft(draft);
-        return {
-          texto: `O profissional selecionado não está compatível com o serviço ${draft.service.name}. Qual é o profissional?`,
-        };
+      const validation = await validateAndMaybeConfirm(draft);
+      if (validation) {
+        if (draft.awaitingConfirmation) {
+          const created = await appointmentsStore.create(buildAppointmentPayload(draft));
+          saveDraft(null);
+          return {
+            texto: `Agendamento confirmado.\n${summarizeDraft(draft)}`,
+            agendamentoCriado: created,
+          };
+        }
+        return validation;
       }
-
-      const endMinutes =
-        timeToMinutes(draft.time) + draft.service.durationMinutes;
-      const endTime = `${String(Math.floor(endMinutes / 60)).padStart(
-        2,
-        "0",
-      )}:${String(endMinutes % 60).padStart(2, "0")}`;
-
-      if (!isWithinWorkingHours(draft.employee, draft.date, draft.time, endTime)) {
-        draft.awaitingConfirmation = false;
-        draft.time = undefined;
-        saveDraft(draft);
-        return {
-          texto: `${draft.employee.name} não atende nesse horário. Me passe outro horário.`,
-        };
-      }
-
-      if (hasConflict(draft)) {
-        draft.awaitingConfirmation = false;
-        draft.time = undefined;
-        saveDraft(draft);
-        return { texto: "Há conflito nesse horário. Me passe outro horário." };
-      }
-
-      const created = await appointmentsStore.create(buildAppointmentPayload(draft));
-      saveDraft(null);
-
-      return {
-        texto: `Agendamento confirmado.\n${summarizeDraft(draft)}`,
-        agendamentoCriado: created,
-      };
     }
 
     const noWithText = trimmed.match(NO_WITH_TEXT);
 
     if (noWithText?.[2]) {
       draft.awaitingConfirmation = false;
-      draft = await applyExtractedEntities(draft, noWithText[2], true);
-    } else if (NO_ONLY.test(trimmed)) {
-      saveDraft(null);
-      return { texto: "Ok. Não executei nada." };
-    } else {
-      draft.awaitingConfirmation = false;
-      draft = await applyExtractedEntities(draft, trimmed, true);
-    }
-  } else {
-    draft = await applyExtractedEntities(draft, trimmed, false);
-  }
+      const correctionText = noWithText[2].trim();
 
-  if (draft.clientQuery && !draft.client) {
-    const clientResolution = await resolveBestClient(
-      trimmed,
-      draft.service,
-      draft.employee,
-    );
-    if (clientResolution.ambiguous?.length) {
+      const error = await applyExtraction(draft, correctionText, true);
+      saveDraft(draft);
+
+      if (error) return { texto: error };
+
+      const afterCorrection = await validateAndMaybeConfirm(draft);
+      if (afterCorrection) {
+        const learnText = maybeOfferLearning(
+          "preferCorrectionAfterNo",
+          "Percebi que você corrigiu um campo com 'não + correção'. Quer que eu use esse padrão como referência futura?",
+        );
+        return {
+          texto: `${afterCorrection.texto}${learnText}`,
+        };
+      }
+
+      return { texto: nextQuestion(draft) };
+    }
+
+    if (NO_ONLY.test(trimmed)) {
+      draft.awaitingConfirmation = false;
       saveDraft(draft);
       return {
-        texto: buildAmbiguityPrompt("cliente", clientResolution.ambiguous),
+        texto:
+          "O que você quer corrigir? Pode me mandar direto, por exemplo: cliente Edvaldo, horário 10:00, serviço corte masculino ou profissional Ricardo Braga.",
       };
     }
+
+    draft.awaitingConfirmation = false;
+    const correctionError = await applyExtraction(draft, trimmed, true);
+    saveDraft(draft);
+
+    if (correctionError) return { texto: correctionError };
+
+    const afterCorrection = await validateAndMaybeConfirm(draft);
+    if (afterCorrection) return afterCorrection;
+
+    return { texto: nextQuestion(draft) };
   }
 
-  const serviceResolution = resolveBestService(trimmed);
-  if (!draft.service && serviceResolution.ambiguous?.length) {
+  const missing = getCurrentMissingSlot(draft);
+
+  if (
+    missing &&
+    !isLikelyFullSentence(trimmed) &&
+    (learning.preferCurrentSlotOnShortReply || trimmed.split(/\s+/).length <= 4)
+  ) {
+    const fillError = await fillCurrentMissingSlot(draft, trimmed);
     saveDraft(draft);
-    return {
-      texto: buildAmbiguityPrompt("serviço", serviceResolution.ambiguous),
-    };
+
+    if (fillError) {
+      const learnText = maybeOfferLearning(
+        "preferCurrentSlotOnShortReply",
+        "Percebi que você respondeu com texto curto para completar a etapa atual. Quer que eu trate esse padrão como referência futura?",
+      );
+      return { texto: `${fillError}${learnText}` };
+    }
+
+    const maybeConfirm = await validateAndMaybeConfirm(draft);
+    if (maybeConfirm) return maybeConfirm;
+
+    return { texto: nextQuestion(draft) };
   }
 
-  const employeeResolution = resolveBestEmployee(trimmed);
-  if (!draft.employee && employeeResolution.ambiguous?.length) {
-    saveDraft(draft);
-    return {
-      texto: buildAmbiguityPrompt("profissional", employeeResolution.ambiguous),
-    };
-  }
+  const extractionError = await applyExtraction(draft, trimmed, false);
+  saveDraft(draft);
 
   if (draft.date && isPastDate(draft.date)) {
-    draft.date = undefined;
+    clearSlot(draft, "date");
     saveDraft(draft);
     return { texto: "Não posso agendar em data passada. Qual é a data?" };
   }
 
-  if (draft.client && draft.date && draft.time && draft.service && draft.employee) {
-    if (!isEmployeeCompatible(draft.employee, draft.service)) {
-      draft.employee = undefined;
-      saveDraft(draft);
-      return {
-        texto: `O serviço ${draft.service.name} não está compatível com esse profissional. Qual é o profissional?`,
-      };
-    }
-
-    const endMinutes = timeToMinutes(draft.time) + draft.service.durationMinutes;
-    const endTime = `${String(Math.floor(endMinutes / 60)).padStart(
-      2,
-      "0",
-    )}:${String(endMinutes % 60).padStart(2, "0")}`;
-
-    if (!isWithinWorkingHours(draft.employee, draft.date, draft.time, endTime)) {
-      draft.time = undefined;
-      saveDraft(draft);
-      return {
-        texto: `${draft.employee.name} não atende nesse horário. Qual é o horário?`,
-      };
-    }
-
-    if (hasConflict(draft)) {
-      draft.time = undefined;
-      saveDraft(draft);
-      return { texto: "Há conflito nesse horário. Qual é o horário?" };
-    }
-
-    draft.awaitingConfirmation = true;
-    saveDraft(draft);
-    return { texto: `Confirma?\n${summarizeDraft(draft)}` };
+  if (extractionError) {
+    return { texto: extractionError };
   }
 
-  saveDraft(draft);
+  const maybeConfirm = await validateAndMaybeConfirm(draft);
+  if (maybeConfirm) return maybeConfirm;
+
   return { texto: nextQuestion(draft) };
 }
 
@@ -932,9 +1272,7 @@ function querySchedule(msg: string): ResultadoAgente {
     });
 
     const employee =
-      employeesStore
-        .list(true)
-        .find((item) => item.id === appointment.employeeId)?.name ??
+      employeesStore.list(true).find((item) => item.id === appointment.employeeId)?.name ??
       `ID ${appointment.employeeId}`;
 
     const service = appointment.services[0]?.name ?? "—";
@@ -947,7 +1285,7 @@ function querySchedule(msg: string): ResultadoAgente {
 async function queryClient(msg: string): Promise<ResultadoAgente> {
   await ensureBaseLoaded();
 
-  const query = stripKnownEntities(msg) || msg.trim();
+  const query = stripForClientCandidate(msg).trim() || msg.trim();
   const found = await clientsStore.search(query, { limit: 10 });
 
   if (!found.length) {
@@ -981,10 +1319,10 @@ function queryAvailable(msg: string): ResultadoAgente {
 
         return !dayAppointments.some((appointment) => {
           if (appointment.status === "cancelled") return false;
-          const start = new Date(appointment.startTime).toLocaleTimeString(
-            "pt-BR",
-            { hour: "2-digit", minute: "2-digit" },
-          );
+          const start = new Date(appointment.startTime).toLocaleTimeString("pt-BR", {
+            hour: "2-digit",
+            minute: "2-digit",
+          });
           return start === time;
         });
       })
@@ -1027,17 +1365,13 @@ function buildSystemPrompt(userMessage: string): string {
     a.name.localeCompare(b.name, "pt-BR"),
   );
 
-  const clientQuery = stripKnownEntities(userMessage) || userMessage.trim();
+  const clientQuery = stripForClientCandidate(userMessage).trim() || userMessage.trim();
 
-  const clients = clientsStore
-    .list()
-    .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+  const clients = clientsStore.list().sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
 
   const matchingClients = clientQuery
     ? clients
-        .filter((client) =>
-          normalizar(client.name).includes(normalizar(clientQuery)),
-        )
+        .filter((client) => normalizar(client.name).includes(normalizar(clientQuery)))
         .slice(0, 20)
     : [];
 
@@ -1061,8 +1395,7 @@ function buildSystemPrompt(userMessage: string): string {
     employees.map((employee) => `- ${employee.name}`).join("\n") || "- nenhum",
     "",
     "CLIENTES DO CADASTRO REAL ENCONTRADOS PARA A BUSCA:",
-    matchingClients.map((client) => `- ${client.name}`).join("\n") ||
-      "- nenhum",
+    matchingClients.map((client) => `- ${client.name}`).join("\n") || "- nenhum",
   ].join("\n");
 }
 
@@ -1081,17 +1414,14 @@ async function answerWithLLM(
     max_tokens: 300,
   });
 
-  const response = await fetch(
-    "https://api.groq.com/openai/v1/chat/completions",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${import.meta.env.VITE_GROQ_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body,
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${import.meta.env.VITE_GROQ_API_KEY}`,
+      "Content-Type": "application/json",
     },
-  );
+    body,
+  });
 
   if (!response.ok) {
     throw new Error(`Groq ${response.status}`);
@@ -1099,8 +1429,7 @@ async function answerWithLLM(
 
   const data = await response.json();
   const texto =
-    data.choices?.[0]?.message?.content?.trim() ||
-    "Não consegui responder agora.";
+    data.choices?.[0]?.message?.content?.trim() || "Não consegui responder agora.";
 
   return { texto };
 }
@@ -1115,6 +1444,11 @@ export async function executarAgente(
     const msg = mensagemUsuario.trim();
     if (!msg) return { texto: "Envie uma mensagem." };
 
+    const pendingLearningAnswer = handlePendingLearningAnswer(msg);
+    if (pendingLearningAnswer) {
+      return pendingLearningAnswer;
+    }
+
     const draft = loadDraft();
     if (draft?.flow === "schedule") {
       return await handleScheduleFlow(msg);
@@ -1123,20 +1457,26 @@ export async function executarAgente(
     switch (detectIntent(msg)) {
       case "schedule":
         return await handleScheduleFlow(msg);
+
       case "query_schedule":
         return querySchedule(msg);
+
       case "query_finance":
         return queryFinance(msg);
+
       case "query_client":
         return await queryClient(msg);
+
       case "query_available":
         return queryAvailable(msg);
+
       case "cancel":
       case "reschedule":
         return {
           texto:
             "Esse fluxo ainda não foi refeito nesta versão do agente. Foquei primeiro em corrigir o agendamento.",
         };
+
       default:
         return await answerWithLLM(msg, historicoConversa);
     }
@@ -1154,6 +1494,9 @@ export async function executarAgente(
       };
     }
 
-    return { texto: "Erro ao processar a mensagem.", erro: message };
+    return {
+      texto: "Erro ao processar a mensagem.",
+      erro: message,
+    };
   }
-}
+    }
