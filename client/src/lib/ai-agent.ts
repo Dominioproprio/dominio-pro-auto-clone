@@ -1,15 +1,21 @@
 import {
+  clientsStore,
+  servicesStore,
+  employeesStore,
   appointmentsStore,
   cashSessionsStore,
-  clientsStore,
-  employeesStore,
-  servicesStore,
-  type Appointment,
-  type AppointmentService,
-  type Client,
   type Employee,
   type Service,
+  type Appointment,
+  type AppointmentService,
 } from "./store";
+import {
+  calcPeriodStats,
+  calcRevenueByEmployee,
+  calcPopularServices,
+  getAppointmentsInPeriod,
+  getPeriodDates,
+} from "./analytics";
 
 export interface MensagemConversa {
   role: "user" | "assistant";
@@ -22,1627 +28,1308 @@ export interface ResultadoAgente {
   erro?: string;
 }
 
-type Intent =
-  | "schedule"
-  | "query_schedule"
-  | "query_finance"
-  | "query_client"
-  | "query_available"
-  | "cancel"
-  | "reschedule"
-  | "unknown";
+type ActionType =
+  | "agendar"
+  | "cancelar"
+  | "mover"
+  | "concluir"
+  | "criar_cliente"
+  | "trocar_cliente";
 
-type SlotName = "client" | "date" | "time" | "service" | "employee";
-
-interface DraftState {
-  flow: "schedule";
-  client?: Client;
-  clientQuery?: string;
-  clientOptions?: string[];
-
-  date?: string;
-  time?: string;
-
-  service?: Service;
-  serviceQuery?: string;
-  serviceOptions?: string[];
-
-  employee?: Employee;
-  employeeQuery?: string;
-  employeeOptions?: string[];
-
-  awaitingConfirmation?: boolean;
-  updatedAt: number;
+interface ActionPayload {
+  type: ActionType;
+  params: Record<string, unknown>;
 }
 
-interface LearningSettings {
-  preferCurrentSlotOnShortReply: boolean;
-  preferCorrectionAfterNo: boolean;
+interface PendingAction {
+  action: ActionPayload;
+  type: "conflict" | "professional";
+  timestamp: number;
 }
 
-interface PendingLearningApproval {
-  key: keyof LearningSettings;
-  prompt: string;
-  createdAt: number;
-}
-
-interface FeedbackRecord {
+interface FeedbackItem {
   id: string;
-  kind: "like" | "dislike";
-  reason?: string;
+  rating: "good" | "bad";
+  userMessage: string;
+  agentResponse: string;
   createdAt: string;
-  draftSnapshot?: string;
 }
 
-const DRAFT_KEY = "dominio_pro_ai_agent_schedule_draft_v6";
-const LEARNING_KEY = "dominio_pro_ai_agent_learning_v1";
-const PENDING_LEARNING_KEY = "dominio_pro_ai_agent_pending_learning_v1";
-const FEEDBACK_KEY = "dominio_pro_ai_agent_feedback_v1";
-
+const HISTORY_KEY = "ai_agent_llm_history_v1";
+const PENDING_KEY = "ai_agent_llm_pending_v1";
+const FEEDBACK_KEY = "ai_agent_feedback_v1";
+const LLM_PROXY = "/api/llm";
+const GITHUB_LLM_ENDPOINT = "https://models.github.ai/inference/chat/completions";
+const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+const HISTORY_LIMIT = 20;
 const TZ = "America/Sao_Paulo";
-
-const YES =
-  /^(sim|s|ok|confirmo|confirmar|pode|isso|isso mesmo|pode confirmar|confirmado)[.! ]*$/i;
-
-const NO_ONLY =
-  /^(nao|não|negativo|corrigir|corrige|errado|nao mesmo|não mesmo)[.! ]*$/i;
-
-const NO_WITH_TEXT =
-  /^(nao|não|negativo|corrigir|corrige|errado)[,.:;! ]+(.+)$/i;
-
-const LEARN_YES =
-  /^(sim aprender|aprender sim|sim, aprender|pode aprender|sim, pode aprender)[.! ]*$/i;
-
-const LEARN_NO =
-  /^(nao aprender|não aprender|nao, aprender nao|não, aprender não|nao, obrigado|não, obrigado)[.! ]*$/i;
-
-const LIKE_ONLY = /^(like|👍)$/i;
-const DISLIKE_ONLY = /^(dislike|deslike|👎)$/i;
-const LIKE_WITH_REASON = /^(like|👍)\s*[:\-]\s*(.+)$/i;
-const DISLIKE_WITH_REASON = /^(dislike|deslike|👎)\s*[:\-]\s*(.+)$/i;
-
-const WEEKDAY_SHORT: Record<string, number> = {
-  dom: 0,
-  domingo: 0,
-  seg: 1,
-  segunda: 1,
-  "segunda-feira": 1,
-  ter: 2,
-  terca: 2,
-  terça: 2,
-  "terca-feira": 2,
-  "terça-feira": 2,
-  qua: 3,
-  quarta: 3,
-  "quarta-feira": 3,
-  qui: 4,
-  quinta: 4,
-  "quinta-feira": 4,
-  sex: 5,
-  sexta: 5,
-  "sexta-feira": 5,
-  sab: 6,
-  sabado: 6,
-  sábado: 6,
-};
-
-const CORE_STOPWORDS = new Set([
-  "quero",
-  "preciso",
-  "pode",
-  "pra",
-  "para",
-  "com",
-  "cliente",
-  "agendar",
-  "agenda",
-  "marcar",
-  "marca",
-  "novo",
-  "horario",
-  "horário",
-  "amanha",
-  "amanhã",
-  "hoje",
-  "depois",
-  "de",
-  "do",
-  "da",
-  "das",
-  "dos",
-  "na",
-  "no",
-  "as",
-  "às",
-  "um",
-  "uma",
-  "remarcar",
-  "reagendar",
-  "cancelar",
-  "desmarcar",
-  "mover",
-  "horas",
-  "hora",
-  "servico",
-  "serviço",
-  "profissional",
-  "dia",
-  "data",
-]);
-
-function normalizar(value: string): string {
-  return (value || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim();
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 function getStorage(): Storage | null {
   return typeof localStorage !== "undefined" ? localStorage : null;
 }
 
-function loadDraft(): DraftState | null {
+function loadHistory(): MensagemConversa[] {
   try {
-    const storage = getStorage();
-    const raw = storage?.getItem(DRAFT_KEY);
-    if (!raw) return null;
+    const raw = getStorage()?.getItem(HISTORY_KEY);
+    return raw ? (JSON.parse(raw) as MensagemConversa[]) : [];
+  } catch {
+    return [];
+  }
+}
 
-    const parsed = JSON.parse(raw) as DraftState;
-    if (!parsed?.updatedAt || Date.now() - parsed.updatedAt > 30 * 60_000) {
-      storage?.removeItem(DRAFT_KEY);
+function saveHistory(history: MensagemConversa[]): void {
+  try {
+    getStorage()?.setItem(HISTORY_KEY, JSON.stringify(history.slice(-HISTORY_LIMIT)));
+  } catch {
+    // ignore
+  }
+}
+
+function addToHistory(role: "user" | "assistant", content: string): void {
+  const history = loadHistory();
+  history.push({ role, content });
+  saveHistory(history);
+}
+
+export function clearHistory(): void {
+  try {
+    getStorage()?.removeItem(HISTORY_KEY);
+    clearPendingAction();
+  } catch {
+    // ignore
+  }
+}
+
+function savePendingAction(action: ActionPayload, type: "conflict" | "professional"): void {
+  try {
+    const payload: PendingAction = { action, type, timestamp: Date.now() };
+    getStorage()?.setItem(PENDING_KEY, JSON.stringify(payload));
+  } catch {
+    // ignore
+  }
+}
+
+function loadPendingAction(): PendingAction | null {
+  try {
+    const raw = getStorage()?.getItem(PENDING_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw) as PendingAction;
+    if (Date.now() - data.timestamp > 10 * 60_000) {
+      clearPendingAction();
       return null;
     }
-
-    return parsed;
+    return data;
   } catch {
     return null;
   }
 }
 
-function saveDraft(draft: DraftState | null): void {
-  const storage = getStorage();
-  if (!storage) return;
-
-  if (!draft) {
-    storage.removeItem(DRAFT_KEY);
-    return;
-  }
-
-  draft.updatedAt = Date.now();
-  storage.setItem(DRAFT_KEY, JSON.stringify(draft));
-}
-
-function summarizeDraft(draft: DraftState | null): string | undefined {
-  if (!draft) return undefined;
-
-  return [
-    `Cliente: ${draft.client?.name ?? "—"}`,
-    `Data: ${draft.date ?? "—"}`,
-    `Horário: ${draft.time ?? "—"}`,
-    `Serviço: ${draft.service?.name ?? "—"}`,
-    `Profissional: ${draft.employee?.name ?? "—"}`,
-  ].join(" | ");
-}
-
-function addFeedback(
-  kind: "like" | "dislike",
-  reason?: string,
-  draft?: DraftState | null,
-): void {
+function clearPendingAction(): void {
   try {
-    const storage = getStorage();
-    if (!storage) return;
-
-    const raw = storage.getItem(FEEDBACK_KEY);
-    const current = raw ? (JSON.parse(raw) as FeedbackRecord[]) : [];
-
-    const next: FeedbackRecord[] = [
-      {
-        id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        kind,
-        reason,
-        createdAt: new Date().toISOString(),
-        draftSnapshot: summarizeDraft(draft),
-      },
-      ...current,
-    ].slice(0, 200);
-
-    storage.setItem(FEEDBACK_KEY, JSON.stringify(next));
+    getStorage()?.removeItem(PENDING_KEY);
   } catch {
-    // não quebra o fluxo
+    // ignore
   }
 }
 
-function handleFeedbackMessage(msg: string, draft: DraftState | null): ResultadoAgente | null {
-  const trimmed = msg.trim();
+function normalizeText(value: string): string {
+  return (value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
 
-  if (LIKE_WITH_REASON.test(trimmed)) {
-    const reason = trimmed.match(LIKE_WITH_REASON)?.[2]?.trim();
-    addFeedback("like", reason, draft);
-    return {
-      texto: "Like registrado com motivo. Vou usar isso como referência de avaliação do agente.",
-    };
+function getTodayStr(): string {
+  return new Date().toISOString().split("T")[0];
+}
+
+function getDayOfWeek(dateStr: string): number {
+  return new Date(`${dateStr}T12:00:00`).getDay();
+}
+
+function timeToMinutes(t: string): number {
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + (m || 0);
+}
+
+function normalizeTime(raw: string): string | null {
+  if (!raw) return null;
+  let t = raw.toLowerCase().replace(/h/gi, ":").replace(/\s+/g, "").trim();
+  t = t.replace(/:$/, "");
+  if (/^\d{1,2}$/.test(t)) t = `${t.padStart(2, "0")}:00`;
+  if (/^\d{1,2}:\d{2}$/.test(t)) {
+    const [h, m] = t.split(":");
+    const hh = Number(h);
+    const mm = Number(m);
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+    return `${h.padStart(2, "0")}:${m}`;
   }
-
-  if (DISLIKE_WITH_REASON.test(trimmed)) {
-    const reason = trimmed.match(DISLIKE_WITH_REASON)?.[2]?.trim();
-    addFeedback("dislike", reason, draft);
-    return {
-      texto: "Dislike registrado com motivo. Vou tratar isso como falha observada do agente.",
-    };
-  }
-
-  if (LIKE_ONLY.test(trimmed)) {
-    addFeedback("like", undefined, draft);
-    return {
-      texto: 'Like registrado. Se quiser detalhar, mande por exemplo: "like: entendeu o cliente certo".',
-    };
-  }
-
-  if (DISLIKE_ONLY.test(trimmed)) {
-    addFeedback("dislike", undefined, draft);
-    return {
-      texto:
-        'Dislike registrado. Se quiser detalhar, mande por exemplo: "dislike: repetiu pergunta do profissional".',
-    };
-  }
-
   return null;
 }
 
-function getLearningSettings(): LearningSettings {
-  try {
-    const storage = getStorage();
-    const raw = storage?.getItem(LEARNING_KEY);
+function resolveDate(raw: string): string {
+  const today = new Date();
+  const r = normalizeText(raw);
 
-    if (!raw) {
-      return {
-        preferCurrentSlotOnShortReply: false,
-        preferCorrectionAfterNo: false,
-      };
-    }
+  if (!r || r === "hoje") return today.toISOString().split("T")[0];
 
-    const parsed = JSON.parse(raw) as Partial<LearningSettings>;
-    return {
-      preferCurrentSlotOnShortReply: Boolean(parsed.preferCurrentSlotOnShortReply),
-      preferCorrectionAfterNo: Boolean(parsed.preferCorrectionAfterNo),
-    };
-  } catch {
-    return {
-      preferCurrentSlotOnShortReply: false,
-      preferCorrectionAfterNo: false,
-    };
-  }
-}
-
-function saveLearningSettings(settings: LearningSettings): void {
-  const storage = getStorage();
-  if (!storage) return;
-  storage.setItem(LEARNING_KEY, JSON.stringify(settings));
-}
-
-function loadPendingLearning(): PendingLearningApproval | null {
-  try {
-    const storage = getStorage();
-    const raw = storage?.getItem(PENDING_LEARNING_KEY);
-    if (!raw) return null;
-
-    const parsed = JSON.parse(raw) as PendingLearningApproval;
-    if (!parsed?.createdAt || Date.now() - parsed.createdAt > 30 * 60_000) {
-      storage?.removeItem(PENDING_LEARNING_KEY);
-      return null;
-    }
-
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function savePendingLearning(value: PendingLearningApproval | null): void {
-  const storage = getStorage();
-  if (!storage) return;
-
-  if (!value) {
-    storage.removeItem(PENDING_LEARNING_KEY);
-    return;
-  }
-
-  storage.setItem(PENDING_LEARNING_KEY, JSON.stringify(value));
-}
-
-function maybeOfferLearning(
-  key: keyof LearningSettings,
-  prompt: string,
-): string {
-  const settings = getLearningSettings();
-  if (settings[key]) return "";
-
-  savePendingLearning({
-    key,
-    prompt,
-    createdAt: Date.now(),
-  });
-
-  return `\n\n${prompt} Responda: "sim aprender" ou "não aprender".`;
-}
-
-function handlePendingLearningAnswer(msg: string): ResultadoAgente | null {
-  const pending = loadPendingLearning();
-  if (!pending) return null;
-
-  if (LEARN_YES.test(msg.trim())) {
-    const settings = getLearningSettings();
-    settings[pending.key] = true;
-    saveLearningSettings(settings);
-    savePendingLearning(null);
-    return {
-      texto:
-        "Aprendizado aprovado. Vou usar isso como referência futura sem quebrar as regras do sistema.",
-    };
-  }
-
-  if (LEARN_NO.test(msg.trim())) {
-    savePendingLearning(null);
-    return {
-      texto:
-        "Certo. Corrijo o caso atual quando necessário, mas não vou usar isso como referência futura.",
-    };
-  }
-
-  return null;
-}
-
-function getLocalNow(): Date {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: TZ,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).formatToParts(new Date());
-
-  const pick = (type: string) =>
-    parts.find((p) => p.type === type)?.value ?? "00";
-
-  return new Date(
-    `${pick("year")}-${pick("month")}-${pick("day")}T${pick("hour")}:${pick(
-      "minute",
-    )}:${pick("second")}`,
-  );
-}
-
-function ymd(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
-function parseYMD(dateStr: string): Date {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  return new Date(y, m - 1, d, 12, 0, 0);
-}
-
-function formatDateLong(dateStr: string): string {
-  return parseYMD(dateStr).toLocaleDateString("pt-BR", {
-    weekday: "long",
-    day: "2-digit",
-    month: "2-digit",
-    timeZone: TZ,
-  });
-}
-
-function timeToMinutes(value: string): number {
-  const [h, m] = value.split(":").map(Number);
-  return h * 60 + m;
-}
-
-function detectIntent(msg: string): Intent {
-  const n = normalizar(msg);
-
-  if (
-    /(agenda de hoje|agenda de amanha|agenda de amanhã|agendamentos|lista da agenda|agenda hoje)/.test(
-      n,
-    )
-  ) {
-    return "query_schedule";
-  }
-
-  if (/(faturamento|caixa|receita|financeiro)/.test(n)) {
-    return "query_finance";
-  }
-
-  if (/(buscar cliente|dados do cliente|telefone do cliente|email do cliente)/.test(n)) {
-    return "query_client";
-  }
-
-  if (/(disponiveis|disponíveis|livres|quem esta livre|quem está livre)/.test(n)) {
-    return "query_available";
-  }
-
-  if (
-    /(cancelar agendamento|cancelar horario|cancelar horário|desmarcar|cancelar)/.test(
-      n,
-    )
-  ) {
-    return "cancel";
-  }
-
-  if (
-    /(remarcar|remarca|reagendar|reagenda|mudar horario|mudar horário|mover horario|mover horário|mover agendamento)/.test(
-      n,
-    )
-  ) {
-    return "reschedule";
-  }
-
-  if (/(agendar|marcar|novo agendamento|encaixar|encaixe)/.test(n)) {
-    return "schedule";
-  }
-
-  return "unknown";
-}
-
-async function ensureBaseLoaded(): Promise<void> {
-  await Promise.allSettled([
-    clientsStore.ensureLoaded(),
-    Promise.resolve(servicesStore.list(true).length || servicesStore.fetchAll()),
-    Promise.resolve(employeesStore.list(true).length || employeesStore.fetchAll()),
-    Promise.resolve(appointmentsStore.list().length || appointmentsStore.fetchAll()),
-    Promise.resolve(cashSessionsStore.list().length || cashSessionsStore.fetchAll()),
-  ]);
-}
-
-function tokenize(value: string): string[] {
-  return normalizar(value)
-    .replace(/[.,;!?()[\]{}"'`´“”]/g, " ")
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter(Boolean);
-}
-
-function scoreByTokens(haystack: string, candidate: string): number {
-  const h = normalizar(haystack);
-  const c = normalizar(candidate);
-
-  if (!c) return 0;
-  if (h === c) return 1;
-  if (h.includes(c)) return 0.93;
-
-  const tokens = c.split(/\s+/).filter(Boolean);
-  if (!tokens.length) return 0;
-
-  const hits = tokens.filter((token) => h.includes(token)).length;
-  if (!hits) return 0;
-
-  const ratio = hits / tokens.length;
-  return ratio >= 1 ? 0.88 : ratio * 0.8;
-}
-
-function getActiveServices(): Service[] {
-  return servicesStore.list(true);
-}
-
-function getActiveEmployees(): Employee[] {
-  return employeesStore.list(true);
-}
-
-function extractTime(raw: string): string | undefined {
-  const match = raw.match(/\b(\d{1,2})(?::|h)?(\d{2})?\b/);
-  if (!match) return undefined;
-
-  const hh = Number(match[1]);
-  const mm = Number(match[2] ?? 0);
-
-  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return undefined;
-
-  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
-}
-
-function resolveDateFromText(
-  raw: string,
-  allowPast = false,
-): string | undefined {
-  const input = normalizar(raw);
-  if (!input) return undefined;
-
-  const today = getLocalNow();
-  today.setHours(12, 0, 0, 0);
-
-  if (/\bhoje\b/.test(input)) return ymd(today);
-
-  if (/\bontem\b/.test(input)) {
+  if (r === "amanha") {
     const d = new Date(today);
-    d.setDate(d.getDate() - 1);
-    return allowPast ? ymd(d) : undefined;
+    d.setDate(today.getDate() + 1);
+    return d.toISOString().split("T")[0];
   }
 
-  if (/\bdepois de amanha\b|\bdepois de amanhã\b/.test(input)) {
-    const d = new Date(today);
-    d.setDate(d.getDate() + 2);
-    return ymd(d);
-  }
+  const dayMap: Record<string, number> = {
+    domingo: 0,
+    segunda: 1,
+    terca: 2,
+    terça: 2,
+    quarta: 3,
+    quinta: 4,
+    sexta: 5,
+    sabado: 6,
+    sábado: 6,
+    "segunda-feira": 1,
+    "terca-feira": 2,
+    "terça-feira": 2,
+    "quarta-feira": 3,
+    "quinta-feira": 4,
+    "sexta-feira": 5,
+  };
 
-  if (/\bamanha\b|\bamanhã\b/.test(input)) {
-    const d = new Date(today);
-    d.setDate(d.getDate() + 1);
-    return ymd(d);
-  }
-
-  const iso = input.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
-
-  const br = input.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
-  if (br) {
-    const day = Number(br[1]);
-    const month = Number(br[2]);
-    let year = Number(br[3] ?? today.getFullYear());
-
-    if (year < 100) year += 2000;
-
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      const d = new Date(year, month - 1, day, 12, 0, 0);
-      return ymd(d);
-    }
-  }
-
-  const keys = Object.keys(WEEKDAY_SHORT).sort((a, b) => b.length - a.length);
-
-  for (const key of keys) {
-    const rx = new RegExp(`\\b${escapeRegex(key)}\\b`, "i");
-    if (!rx.test(input)) continue;
-
-    const target = WEEKDAY_SHORT[key];
+  if (dayMap[r] !== undefined) {
+    const target = dayMap[r];
     const current = today.getDay();
     let diff = target - current;
-
     if (diff <= 0) diff += 7;
-
     const d = new Date(today);
-    d.setDate(d.getDate() + diff);
-    return ymd(d);
+    d.setDate(today.getDate() + diff);
+    return d.toISOString().split("T")[0];
   }
 
-  return undefined;
+  if (/^\d{1,2}\/\d{1,2}$/.test(r)) {
+    const [dd, mm] = r.split("/");
+    return `${today.getFullYear()}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+  }
+
+  if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(r)) {
+    const [dd, mm, yy] = r.split("/");
+    const yyyy = yy.length === 2 ? `20${yy}` : yy;
+    return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(r)) return r;
+  return r;
 }
 
-function isPastDate(dateStr: string): boolean {
-  return dateStr < ymd(getLocalNow());
-}
-
-function extractStructuredField(
-  text: string,
-  labels: string[],
-  stopLabels: string[],
-): string | undefined {
-  const cleanText = text.replace(/\n/g, " ");
-  const stopPattern = stopLabels.map((item) => escapeRegex(item)).join("|");
-
-  for (const label of labels) {
-    const rx = new RegExp(
-      `(?:^|\\b)${escapeRegex(label)}\\b\\s*[:=-]?\\s*(.+?)(?=(?:\\b(?:${stopPattern})\\b\\s*[:=-]?|$))`,
-      "i",
-    );
-
-    const match = cleanText.match(rx);
-    const value = match?.[1]?.trim();
-    if (value) return value;
-  }
-
-  return undefined;
-}
-
-function isLikelyFullSentence(text: string): boolean {
-  const n = normalizar(text);
-  return (
-    /(agendar|marcar|cliente|servico|serviço|profissional|com|amanha|amanhã|hoje)/.test(n) ||
-    /\b\d{1,2}(?::|h)?\d{0,2}\b/.test(n)
-  );
-}
-
-function isProfessionalsListQuery(text: string): boolean {
-  const n = normalizar(text);
-  return /(lista de profissionais|quais profissionais|quem sao os profissionais|quem são os profissionais|profissionais disponiveis|profissionais disponíveis)/.test(
-    n,
-  );
-}
-
-function isServicesListQuery(text: string): boolean {
-  const n = normalizar(text);
-  return /(lista de servicos|lista de serviços|quais servicos|quais serviços|servicos disponiveis|serviços disponíveis)/.test(
-    n,
-  );
-}
-
-function formatProfessionalsList(): string {
-  const employees = getActiveEmployees().sort((a, b) =>
-    a.name.localeCompare(b.name, "pt-BR"),
-  );
-
-  if (!employees.length) return "Não encontrei profissionais cadastrados.";
-
-  return `Profissionais cadastrados:\n- ${employees.map((item) => item.name).join("\n- ")}`;
-}
-
-function formatServicesList(): string {
-  const services = getActiveServices().sort((a, b) =>
-    a.name.localeCompare(b.name, "pt-BR"),
-  );
-
-  if (!services.length) return "Não encontrei serviços cadastrados.";
-
-  return `Serviços cadastrados:\n- ${services.map((item) => item.name).join("\n- ")}`;
-}
-
-function stripForClientCandidate(text: string): string {
-  let out = normalizar(text);
-
-  for (const service of getActiveServices()) {
-    const rx = new RegExp(`\\b${escapeRegex(normalizar(service.name))}\\b`, "gi");
-    out = out.replace(rx, " ");
-  }
-
-  for (const employee of getActiveEmployees()) {
-    const rx = new RegExp(`\\b${escapeRegex(normalizar(employee.name))}\\b`, "gi");
-    out = out.replace(rx, " ");
-  }
-
-  out = out.replace(/\bcom\s+[a-zà-ÿ]+(?:\s+[a-zà-ÿ]+){0,2}\b/gi, " ");
-  out = out.replace(/\b\d{1,2}(?::|h)?\d{0,2}\b/g, " ");
-  out = out.replace(/\b(20\d{2})-(\d{2})-(\d{2})\b/g, " ");
-  out = out.replace(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/g, " ");
-
-  const weekdayKeys = Object.keys(WEEKDAY_SHORT).sort((a, b) => b.length - a.length);
-  for (const key of weekdayKeys) {
-    const rx = new RegExp(`\\b${escapeRegex(normalizar(key))}\\b`, "gi");
-    out = out.replace(rx, " ");
-  }
-
-  const tokens = tokenize(out).filter((token) => !CORE_STOPWORDS.has(token));
-  return tokens.slice(0, 4).join(" ").trim();
-}
-
-function resolveBestService(text: string): {
-  service?: Service;
-  ambiguous?: string[];
-} {
-  const base = getActiveServices();
-
-  const scored = base
-    .map((service) => ({
-      service,
-      score: scoreByTokens(text, service.name),
-    }))
-    .filter((item) => item.score >= 0.72)
-    .sort(
-      (a, b) =>
-        b.score - a.score ||
-        a.service.name.localeCompare(b.service.name, "pt-BR"),
-    );
-
-  if (!scored.length) return {};
-  if (scored.length === 1) return { service: scored[0].service };
-
-  const top = scored[0];
-  const second = scored[1];
-
-  if (top.score >= 0.9 && second.score <= 0.74) {
-    return { service: top.service };
-  }
-
-  const normalizedText = normalizar(text);
-  const exact = scored.filter((item) =>
-    normalizedText.includes(normalizar(item.service.name)),
-  );
-  if (exact.length === 1) {
-    return { service: exact[0].service };
-  }
-
-  return {
-    ambiguous: scored.slice(0, 5).map((item) => item.service.name),
-  };
-}
-
-function resolveBestEmployee(text: string): {
-  employee?: Employee;
-  ambiguous?: string[];
-} {
-  const explicit =
-    extractStructuredField(
-      text,
-      ["profissional", "com"],
-      ["cliente", "servico", "serviço", "horario", "horário", "data", "dia"],
-    ) ?? text;
-
-  const base = getActiveEmployees();
-
-  const scored = base
-    .map((employee) => ({
-      employee,
-      score: scoreByTokens(explicit, employee.name),
-    }))
-    .filter((item) => item.score >= 0.72)
-    .sort(
-      (a, b) =>
-        b.score - a.score ||
-        a.employee.name.localeCompare(b.employee.name, "pt-BR"),
-    );
-
-  if (!scored.length) return {};
-  if (scored.length === 1) return { employee: scored[0].employee };
-
-  const top = scored[0];
-  const second = scored[1];
-
-  if (top.score >= 0.9 && second.score <= 0.74) {
-    return { employee: top.employee };
-  }
-
-  const normalizedText = normalizar(explicit);
-  const exact = scored.filter((item) =>
-    normalizedText.includes(normalizar(item.employee.name)),
-  );
-  if (exact.length === 1) {
-    return { employee: exact[0].employee };
-  }
-
-  return {
-    ambiguous: scored.slice(0, 5).map((item) => item.employee.name),
-  };
-}
-
-async function resolveBestClient(text: string): Promise<{
-  client?: Client;
-  query?: string;
-  ambiguous?: string[];
-}> {
-  const explicit = extractStructuredField(
-    text,
-    ["cliente", "nome do cliente"],
-    ["servico", "serviço", "horario", "horário", "data", "dia", "profissional", "com"],
-  );
-
-  const candidate = explicit ? normalizar(explicit) : stripForClientCandidate(text);
-  if (!candidate || candidate.length < 2) return {};
-
-  const found = await clientsStore.search(candidate, { limit: 8 });
-  if (!found.length) return { query: candidate };
-
-  const scored = found
-    .map((client) => ({
-      client,
-      score: scoreByTokens(candidate, client.name),
-    }))
-    .sort(
-      (a, b) =>
-        b.score - a.score ||
-        a.client.name.localeCompare(b.client.name, "pt-BR"),
-    );
-
-  const top = scored[0];
-  const second = scored[1];
-
-  if (!second && top.score >= 0.72) {
-    return { client: top.client, query: candidate };
-  }
-
-  if (top.score >= 0.94 && (second?.score ?? 0) <= 0.74) {
-    return { client: top.client, query: candidate };
-  }
-
-  if (top.score === 1 && second && second.score < 0.75) {
-    return { client: top.client, query: candidate };
-  }
-
-  return {
-    query: candidate,
-    ambiguous: scored.slice(0, 5).map((item) => item.client.name),
-  };
-}
-
-function getCurrentMissingSlot(draft: DraftState): SlotName | null {
-  if (!draft.client) return "client";
-  if (!draft.date) return "date";
-  if (!draft.time) return "time";
-  if (!draft.service) return "service";
-  if (!draft.employee) return "employee";
-  return null;
-}
-
-function clearSlot(draft: DraftState, slot: SlotName): void {
-  if (slot === "client") {
-    draft.client = undefined;
-    draft.clientQuery = undefined;
-    draft.clientOptions = undefined;
-  }
-  if (slot === "date") {
-    draft.date = undefined;
-  }
-  if (slot === "time") {
-    draft.time = undefined;
-  }
-  if (slot === "service") {
-    draft.service = undefined;
-    draft.serviceQuery = undefined;
-    draft.serviceOptions = undefined;
-  }
-  if (slot === "employee") {
-    draft.employee = undefined;
-    draft.employeeQuery = undefined;
-    draft.employeeOptions = undefined;
-  }
-}
-
-function nextQuestion(draft: DraftState): string {
-  const missing = getCurrentMissingSlot(draft);
-
-  if (missing === "client") {
-    if (draft.clientOptions?.length) {
-      return `Encontrei mais de um cliente parecido. Digite o nome completo.\n- ${draft.clientOptions.join("\n- ")}`;
-    }
-    if (draft.clientQuery) {
-      return `Não encontrei o cliente "${draft.clientQuery}" no cadastro real. Qual é o cliente?`;
-    }
-    return "Qual é o cliente?";
-  }
-
-  if (missing === "date") return "Qual é a data?";
-  if (missing === "time") return "Qual é o horário?";
-
-  if (missing === "service") {
-    if (draft.serviceOptions?.length) {
-      return `Encontrei mais de um serviço parecido. Digite o nome completo do serviço.\n- ${draft.serviceOptions.join("\n- ")}`;
-    }
-    if (draft.serviceQuery) {
-      return `Não identifiquei o serviço "${draft.serviceQuery}". Qual é o serviço?`;
-    }
-    return "Qual é o serviço?";
-  }
-
-  if (missing === "employee") {
-    if (draft.employeeOptions?.length) {
-      return `Encontrei mais de um profissional parecido. Digite o nome completo do profissional.\n- ${draft.employeeOptions.join("\n- ")}`;
-    }
-    if (draft.employeeQuery) {
-      return `Não identifiquei o profissional "${draft.employeeQuery}". Qual é o profissional?`;
-    }
-    return "Qual é o profissional?";
-  }
-
-  return `Confirma?\n${summarizeDraft(draft)}`;
-}
-
-async function fillClientOnly(
-  draft: DraftState,
-  text: string,
-): Promise<string | null> {
-  const resolution = await resolveBestClient(text);
-
-  if (resolution.client) {
-    draft.client = resolution.client;
-    draft.clientQuery = undefined;
-    draft.clientOptions = undefined;
-    return null;
-  }
-
-  if (resolution.ambiguous?.length) {
-    draft.clientQuery = resolution.query;
-    draft.clientOptions = resolution.ambiguous;
-    return `Encontrei mais de um cliente parecido. Digite o nome completo.\n- ${resolution.ambiguous.join("\n- ")}`;
-  }
-
-  if (resolution.query) {
-    draft.clientQuery = resolution.query;
-    return `Não encontrei o cliente "${resolution.query}" no cadastro real. Qual é o cliente?`;
-  }
-
-  return "Qual é o cliente?";
-}
-
-function fillDateOnly(draft: DraftState, text: string): string | null {
-  const date = resolveDateFromText(text, false);
-  if (!date) return "Qual é a data?";
-  if (isPastDate(date)) return "Não posso agendar em data passada. Qual é a data?";
-  draft.date = date;
-  return null;
-}
-
-function fillTimeOnly(draft: DraftState, text: string): string | null {
-  const time = extractTime(text);
-  if (!time) return "Qual é o horário?";
-  draft.time = time;
-  return null;
-}
-
-function fillServiceOnly(draft: DraftState, text: string): string | null {
-  const resolution = resolveBestService(text);
-
-  if (resolution.service) {
-    draft.service = resolution.service;
-    draft.serviceQuery = undefined;
-    draft.serviceOptions = undefined;
-    return null;
-  }
-
-  if (resolution.ambiguous?.length) {
-    draft.serviceQuery = text.trim();
-    draft.serviceOptions = resolution.ambiguous;
-    return `Encontrei mais de um serviço parecido. Digite o nome completo do serviço.\n- ${resolution.ambiguous.join("\n- ")}`;
-  }
-
-  draft.serviceQuery = text.trim();
-  return "Qual é o serviço?";
-}
-
-function fillEmployeeOnly(draft: DraftState, text: string): string | null {
-  const resolution = resolveBestEmployee(text);
-
-  if (resolution.employee) {
-    draft.employee = resolution.employee;
-    draft.employeeQuery = undefined;
-    draft.employeeOptions = undefined;
-    return null;
-  }
-
-  if (resolution.ambiguous?.length) {
-    draft.employeeQuery = text.trim();
-    draft.employeeOptions = resolution.ambiguous;
-    return `Encontrei mais de um profissional parecido. Digite o nome completo do profissional.\n- ${resolution.ambiguous.join("\n- ")}`;
-  }
-
-  draft.employeeQuery = text.trim();
-  return "Qual é o profissional?";
-}
-
-async function fillCurrentMissingSlot(
-  draft: DraftState,
-  text: string,
-): Promise<string | null> {
-  const missing = getCurrentMissingSlot(draft);
-  if (!missing) return null;
-
-  const n = normalizar(text);
-  if (YES.test(text) || NO_ONLY.test(text) || n === "ok") {
-    return nextQuestion(draft);
-  }
-
-  if (missing === "client") return fillClientOnly(draft, text);
-  if (missing === "date") return fillDateOnly(draft, text);
-  if (missing === "time") return fillTimeOnly(draft, text);
-  if (missing === "service") return fillServiceOnly(draft, text);
-  return fillEmployeeOnly(draft, text);
-}
-
-async function applyExtraction(
-  draft: DraftState,
-  text: string,
-  allowOverride: boolean,
-): Promise<string | null> {
-  const explicitClient = extractStructuredField(
-    text,
-    ["cliente", "nome do cliente"],
-    ["servico", "serviço", "horario", "horário", "data", "dia", "profissional", "com"],
-  );
-
-  const explicitService = extractStructuredField(
-    text,
-    ["servico", "serviço"],
-    ["cliente", "horario", "horário", "data", "dia", "profissional", "com"],
-  );
-
-  const explicitEmployee = extractStructuredField(
-    text,
-    ["profissional", "com"],
-    ["cliente", "servico", "serviço", "horario", "horário", "data", "dia"],
-  );
-
-  const explicitDate = extractStructuredField(
-    text,
-    ["data", "dia"],
-    ["cliente", "servico", "serviço", "horario", "horário", "profissional", "com"],
-  );
-
-  const explicitTime = extractStructuredField(
-    text,
-    ["horario", "horário"],
-    ["cliente", "servico", "serviço", "data", "dia", "profissional", "com"],
-  );
-
-  if (explicitClient && (!draft.client || allowOverride)) {
-    clearSlot(draft, "client");
-    const error = await fillClientOnly(draft, explicitClient);
-    if (error) return error;
-  } else if (!draft.client && isLikelyFullSentence(text)) {
-    const resolution = await resolveBestClient(text);
-    if (resolution.client) {
-      draft.client = resolution.client;
-      draft.clientQuery = undefined;
-      draft.clientOptions = undefined;
-    } else if (resolution.ambiguous?.length) {
-      draft.clientQuery = resolution.query;
-      draft.clientOptions = resolution.ambiguous;
-    } else if (resolution.query) {
-      draft.clientQuery = resolution.query;
-    }
-  }
-
-  if (explicitDate && (!draft.date || allowOverride)) {
-    const error = fillDateOnly(draft, explicitDate);
-    if (error) return error;
-  } else if (!draft.date && isLikelyFullSentence(text)) {
-    const date = resolveDateFromText(text, false);
-    if (date && !isPastDate(date)) draft.date = date;
-  }
-
-  if (explicitTime && (!draft.time || allowOverride)) {
-    const error = fillTimeOnly(draft, explicitTime);
-    if (error) return error;
-  } else if (!draft.time && isLikelyFullSentence(text)) {
-    const time = extractTime(text);
-    if (time) draft.time = time;
-  }
-
-  if (explicitService && (!draft.service || allowOverride)) {
-    clearSlot(draft, "service");
-    const error = fillServiceOnly(draft, explicitService);
-    if (error) return error;
-  } else if (!draft.service && isLikelyFullSentence(text)) {
-    const resolution = resolveBestService(text);
-    if (resolution.service) {
-      draft.service = resolution.service;
-      draft.serviceQuery = undefined;
-      draft.serviceOptions = undefined;
-    } else if (resolution.ambiguous?.length) {
-      draft.serviceQuery = text.trim();
-      draft.serviceOptions = resolution.ambiguous;
-    }
-  }
-
-  if (explicitEmployee && (!draft.employee || allowOverride)) {
-    clearSlot(draft, "employee");
-    const error = fillEmployeeOnly(draft, explicitEmployee);
-    if (error) return error;
-  } else if (!draft.employee && isLikelyFullSentence(text)) {
-    const resolution = resolveBestEmployee(text);
-    if (resolution.employee) {
-      draft.employee = resolution.employee;
-      draft.employeeQuery = undefined;
-      draft.employeeOptions = undefined;
-    } else if (resolution.ambiguous?.length) {
-      draft.employeeQuery = text.trim();
-      draft.employeeOptions = resolution.ambiguous;
-    }
-  }
-
-  return null;
-}
-
-function getWeekdayKey(dateStr: string): string {
-  return ["dom", "seg", "ter", "qua", "qui", "sex", "sab"][parseYMD(dateStr).getDay()]!;
-}
-
-function isWithinWorkingHours(
-  employee: Employee,
-  dateStr: string,
-  startTime: string,
-  endTime: string,
-): boolean {
-  const key = getWeekdayKey(dateStr);
-  const slot = employee.workingHours?.[key];
-  if (!slot?.active) return false;
-
-  return (
-    timeToMinutes(startTime) >= timeToMinutes(slot.start) &&
-    timeToMinutes(endTime) <= timeToMinutes(slot.end)
-  );
-}
-
-function isEmployeeCompatible(employee: Employee, service: Service): boolean {
-  if (!employee.specialties?.length) return true;
-
-  const serviceName = normalizar(service.name);
-  return employee.specialties.some((specialty) => {
-    const s = normalizar(specialty);
-    return serviceName.includes(s) || s.includes(serviceName);
-  });
-}
-
-function buildAppointmentPayload(
-  draft: DraftState,
-): Omit<Appointment, "id" | "createdAt"> {
-  const startTime = new Date(`${draft.date}T${draft.time}:00`).toISOString();
-  const end = new Date(
-    new Date(`${draft.date}T${draft.time}:00`).getTime() +
-      (draft.service?.durationMinutes ?? 0) * 60_000,
-  );
-  const endTime = end.toISOString();
-
-  const serviceItem: AppointmentService = {
-    serviceId: draft.service!.id,
-    name: draft.service!.name,
-    price: draft.service!.price,
-    durationMinutes: draft.service!.durationMinutes,
-    color: draft.service!.color,
-    materialCostPercent: draft.service!.materialCostPercent,
-  };
-
-  return {
-    clientName: draft.client!.name,
-    clientId: draft.client!.id,
-    employeeId: draft.employee!.id,
-    startTime,
-    endTime,
-    status: "scheduled",
-    totalPrice: draft.service!.price,
-    notes: "Criado via Agente IA",
-    paymentStatus: null,
-    groupId: null,
-    services: [serviceItem],
-  };
-}
-
-function hasConflict(draft: DraftState): boolean {
-  const payload = buildAppointmentPayload(draft);
-  const start = new Date(payload.startTime).getTime();
-  const end = new Date(payload.endTime).getTime();
-
-  return appointmentsStore
-    .list({ date: draft.date, employeeId: draft.employee!.id })
-    .some((appointment) => {
-      if (appointment.status === "cancelled") return false;
-      const aStart = new Date(appointment.startTime).getTime();
-      const aEnd = new Date(appointment.endTime).getTime();
-      return start < aEnd && end > aStart;
-    });
-}
-
-async function validateAndMaybeConfirm(draft: DraftState): Promise<ResultadoAgente | null> {
-  if (!draft.client || !draft.date || !draft.time || !draft.service || !draft.employee) {
-    return null;
-  }
-
-  if (!isEmployeeCompatible(draft.employee, draft.service)) {
-    clearSlot(draft, "employee");
-    saveDraft(draft);
-    return {
-      texto: `O serviço ${draft.service.name} não está compatível com esse profissional. Qual é o profissional?`,
-    };
-  }
-
-  const endMinutes = timeToMinutes(draft.time) + draft.service.durationMinutes;
-  const endTime = `${String(Math.floor(endMinutes / 60)).padStart(2, "0")}:${String(
-    endMinutes % 60,
-  ).padStart(2, "0")}`;
-
-  if (!isWithinWorkingHours(draft.employee, draft.date, draft.time, endTime)) {
-    clearSlot(draft, "time");
-    saveDraft(draft);
-    return {
-      texto: `${draft.employee.name} não atende nesse horário. Qual é o horário?`,
-    };
-  }
-
-  if (hasConflict(draft)) {
-    clearSlot(draft, "time");
-    saveDraft(draft);
-    return { texto: "Há conflito nesse horário. Qual é o horário?" };
-  }
-
-  draft.awaitingConfirmation = true;
-  saveDraft(draft);
-  return { texto: `Confirma?\n${summarizeDraft(draft)}` };
-}
-
-function getInFlowSideQueryResponse(draft: DraftState, msg: string): string | null {
-  if (isProfessionalsListQuery(msg)) {
-    return `${formatProfessionalsList()}\n\nVoltando ao agendamento: ${nextQuestion(draft)}`;
-  }
-
-  if (isServicesListQuery(msg)) {
-    return `${formatServicesList()}\n\nVoltando ao agendamento: ${nextQuestion(draft)}`;
-  }
-
-  return null;
-}
-
-async function handleScheduleFlow(msg: string): Promise<ResultadoAgente> {
-  await ensureBaseLoaded();
-
-  const trimmed = msg.trim();
-  const normalized = normalizar(trimmed);
-  const learning = getLearningSettings();
-
-  let draft =
-    loadDraft() ??
-    ({
-      flow: "schedule",
-      updatedAt: Date.now(),
-    } as DraftState);
-
-  const sideQuery = getInFlowSideQueryResponse(draft, trimmed);
-  if (sideQuery) {
-    return { texto: sideQuery };
-  }
-
-  if (
-    /\be\b/.test(normalized) &&
-    /( e |,)/.test(normalized) &&
-    /(corte|escova|hidr|hidrat|sobrancelha|unha|servico|serviço)/.test(normalized)
-  ) {
-    return {
-      texto: "Serviço múltiplo ainda não está fechado. Me passe um serviço por vez.",
-    };
-  }
-
-  if (draft.awaitingConfirmation) {
-    if (YES.test(trimmed)) {
-      if (!draft.client || !draft.date || !draft.time || !draft.service || !draft.employee) {
-        draft.awaitingConfirmation = false;
-        saveDraft(draft);
-        return { texto: nextQuestion(draft) };
-      }
-
-      const validation = await validateAndMaybeConfirm(draft);
-      if (validation) {
-        if (draft.awaitingConfirmation) {
-          const created = await appointmentsStore.create(buildAppointmentPayload(draft));
-          saveDraft(null);
-          return {
-            texto: `Agendamento confirmado.\n${summarizeDraft(draft)}`,
-            agendamentoCriado: created,
-          };
-        }
-        return validation;
-      }
-    }
-
-    const noWithText = trimmed.match(NO_WITH_TEXT);
-
-    if (noWithText?.[2]) {
-      draft.awaitingConfirmation = false;
-      const correctionText = noWithText[2].trim();
-
-      const error = await applyExtraction(draft, correctionText, true);
-      saveDraft(draft);
-
-      if (error) return { texto: error };
-
-      const afterCorrection = await validateAndMaybeConfirm(draft);
-      if (afterCorrection) {
-        const learnText = maybeOfferLearning(
-          "preferCorrectionAfterNo",
-          "Percebi que você corrigiu um campo com 'não + correção'. Quer que eu use esse padrão como referência futura?",
-        );
-        return { texto: `${afterCorrection.texto}${learnText}` };
-      }
-
-      return { texto: nextQuestion(draft) };
-    }
-
-    if (NO_ONLY.test(trimmed)) {
-      draft.awaitingConfirmation = false;
-      saveDraft(draft);
-      return {
-        texto:
-          "O que você quer corrigir? Pode me mandar direto, por exemplo: cliente Edvaldo, horário 10:00, serviço corte masculino ou profissional Ricardo Braga.",
-      };
-    }
-
-    draft.awaitingConfirmation = false;
-    const correctionError = await applyExtraction(draft, trimmed, true);
-    saveDraft(draft);
-
-    if (correctionError) return { texto: correctionError };
-
-    const afterCorrection = await validateAndMaybeConfirm(draft);
-    if (afterCorrection) return afterCorrection;
-
-    return { texto: nextQuestion(draft) };
-  }
-
-  const missing = getCurrentMissingSlot(draft);
-
-  if (
-    missing &&
-    !isLikelyFullSentence(trimmed) &&
-    (learning.preferCurrentSlotOnShortReply || trimmed.split(/\s+/).length <= 4)
-  ) {
-    const fillError = await fillCurrentMissingSlot(draft, trimmed);
-    saveDraft(draft);
-
-    if (fillError) {
-      const learnText = maybeOfferLearning(
-        "preferCurrentSlotOnShortReply",
-        "Percebi que você respondeu com texto curto para completar a etapa atual. Quer que eu trate esse padrão como referência futura?",
-      );
-      return { texto: `${fillError}${learnText}` };
-    }
-
-    const maybeConfirm = await validateAndMaybeConfirm(draft);
-    if (maybeConfirm) return maybeConfirm;
-
-    return { texto: nextQuestion(draft) };
-  }
-
-  const extractionError = await applyExtraction(draft, trimmed, false);
-  saveDraft(draft);
-
-  if (draft.date && isPastDate(draft.date)) {
-    clearSlot(draft, "date");
-    saveDraft(draft);
-    return { texto: "Não posso agendar em data passada. Qual é a data?" };
-  }
-
-  if (extractionError) {
-    return { texto: extractionError };
-  }
-
-  const maybeConfirm = await validateAndMaybeConfirm(draft);
-  if (maybeConfirm) return maybeConfirm;
-
-  return { texto: nextQuestion(draft) };
-}
-
-function getDateForQuery(msg: string): string {
-  return resolveDateFromText(msg, true) ?? ymd(getLocalNow());
-}
-
-function querySchedule(msg: string): ResultadoAgente {
-  const date = getDateForQuery(msg);
-
-  const list = appointmentsStore
-    .list({ date })
-    .filter((appointment) => appointment.status !== "cancelled")
-    .sort((a, b) => a.startTime.localeCompare(b.startTime))
-    .slice(0, 20);
-
-  if (!list.length) {
-    return { texto: `Sem agendamentos para ${formatDateLong(date)}.` };
-  }
-
-  const lines = list.map((appointment) => {
-    const time = new Date(appointment.startTime).toLocaleTimeString("pt-BR", {
+function safeLocalTime(iso: string | null | undefined): string {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleTimeString("pt-BR", {
       hour: "2-digit",
       minute: "2-digit",
     });
-
-    const employee =
-      employeesStore.list(true).find((item) => item.id === appointment.employeeId)?.name ??
-      `ID ${appointment.employeeId}`;
-
-    const service = appointment.services[0]?.name ?? "—";
-    return `${time} — ${appointment.clientName ?? "—"} — ${service} — ${employee}`;
-  });
-
-  return { texto: `${formatDateLong(date)}\n${lines.join("\n")}` };
+  } catch {
+    return "";
+  }
 }
 
-async function queryClient(msg: string): Promise<ResultadoAgente> {
-  await ensureBaseLoaded();
+function isWithinWorkingHours(
+  emp: Employee,
+  dateStr: string,
+  timeStr: string,
+): { ok: boolean; message?: string } {
+  const wh = emp.workingHours;
+  if (!wh || Object.keys(wh).length === 0) return { ok: true };
+  if (Object.keys(wh).length === 1) return { ok: true };
 
-  const query = stripForClientCandidate(msg).trim() || msg.trim();
-  const found = await clientsStore.search(query, { limit: 10 });
+  const dayOfWeek = getDayOfWeek(dateStr);
+  const ptKeys: Record<number, string[]> = {
+    0: ["dom", "domingo"],
+    1: ["seg", "segunda", "segunda-feira"],
+    2: ["ter", "terca", "terça", "terca-feira", "terça-feira"],
+    3: ["qua", "quarta", "quarta-feira"],
+    4: ["qui", "quinta", "quinta-feira"],
+    5: ["sex", "sexta", "sexta-feira"],
+    6: ["sab", "sabado", "sábado"],
+  };
 
-  if (!found.length) {
-    return { texto: `Não encontrei cliente para "${query}".` };
+  const possibleKeys = [String(dayOfWeek), ...(ptKeys[dayOfWeek] ?? [])];
+  const matchedKey = possibleKeys.find((k) => wh[k] !== undefined);
+  const dayConfig = matchedKey ? wh[matchedKey] : undefined;
+
+  if (!dayConfig || !dayConfig.active) {
+    const dayNames = [
+      "domingo",
+      "segunda-feira",
+      "terça-feira",
+      "quarta-feira",
+      "quinta-feira",
+      "sexta-feira",
+      "sábado",
+    ];
+    return {
+      ok: false,
+      message: `${emp.name} não trabalha ${dayNames[dayOfWeek]}.`,
+    };
   }
 
-  const lines = found
-    .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"))
-    .slice(0, 10)
-    .map(
-      (client) =>
-        `${client.name}${client.phone ? ` — ${client.phone}` : ""}${
-          client.email ? ` — ${client.email}` : ""
-        }`,
+  const startMin = timeToMinutes(dayConfig.start);
+  const endMin = timeToMinutes(dayConfig.end);
+  const reqMin = timeToMinutes(timeStr);
+
+  if (reqMin < startMin || reqMin >= endMin) {
+    return {
+      ok: false,
+      message: `${emp.name} trabalha das ${dayConfig.start} às ${dayConfig.end} neste dia. O horário ${timeStr} está fora do expediente.`,
+    };
+  }
+
+  return { ok: true };
+}
+
+function extractCandidateNames(message: string, history: MensagemConversa[]): string[] {
+  const recentHistory = history.slice(-6).map((item) => item.content).join(" ");
+  const fullContext = `${message} ${recentHistory}`;
+
+  const normalize = (s: string) =>
+    s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+  const employeesLower = new Set(
+    employeesStore.list(true).flatMap((e) => e.name.split(" ").map(normalize)),
+  );
+  const servicesLower = new Set(
+    servicesStore.list(true).flatMap((s) => s.name.split(" ").map(normalize)),
+  );
+
+  const stopWords = new Set([
+    "com",
+    "sem",
+    "por",
+    "ate",
+    "das",
+    "dos",
+    "num",
+    "uma",
+    "uns",
+    "ela",
+    "ele",
+    "elas",
+    "eles",
+    "seu",
+    "sua",
+    "seus",
+    "suas",
+    "quero",
+    "agendar",
+    "marcar",
+    "cliente",
+    "para",
+    "preciso",
+    "cancelar",
+    "mover",
+    "agenda",
+    "hoje",
+    "amanha",
+    "hora",
+    "servico",
+    "horario",
+    "consegue",
+    "executar",
+    "agendamento",
+    "voce",
+    "fazer",
+    "nome",
+    "tenho",
+    "qual",
+    "quais",
+    "pode",
+    "como",
+    "quanto",
+    "tempo",
+    "duracao",
+    "corte",
+    "escova",
+    "tintura",
+    "manicure",
+    "pedicure",
+    "barba",
+    "hidratacao",
+    "hidratação",
+    "profunda",
+    "progressiva",
+    "termica",
+    "térmica",
+    "relaxamento",
+    "botox",
+    "coloracao",
+    "coloração",
+    "luzes",
+    "alisamento",
+    "massagem",
+    "unhas",
+    "masculino",
+    "feminino",
+    "selagem",
+    "reflexo",
+    "mechas",
+    "penteado",
+    "sobrancelha",
+    "sim",
+    "nao",
+    "não",
+    "forcar",
+    "forçar",
+    "confirma",
+    "confirmar",
+    "forca",
+    "força",
+    "mesmo",
+    "assim",
+    "deixa",
+    "esquece",
+    "cancelado",
+    "mova",
+    "mude",
+    "concluir",
+    "fechar",
+    "abrir",
+    "buscar",
+    "procurar",
+    "faturamento",
+    "financeiro",
+    "receita",
+    "comissao",
+    "comissão",
+    "relatorio",
+    "relatório",
+    "rendimento",
+    "lucro",
+    "ganho",
+    "caixa",
+    "semana",
+    "mes",
+    "mês",
+  ]);
+
+  const words = fullContext
+    .split(/\s+/)
+    .map((w) => w.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'-]/g, ""))
+    .filter((w) => w.length > 2);
+
+  return words.filter((w) => {
+    const wl = normalize(w);
+    return !stopWords.has(wl) && !employeesLower.has(wl) && !servicesLower.has(wl);
+  });
+}
+
+function getTodayData(): string {
+  const today = getTodayStr();
+  const appointments = appointmentsStore.list({ date: today });
+  const employees = employeesStore.list(true);
+  if (appointments.length === 0) return `Hoje (${today}): nenhum agendamento.`;
+
+  const lines = appointments.map((appointment) => {
+    const employee = employees.find((item) => item.id === appointment.employeeId);
+    const services = appointment.services?.map((s) => s.name).join(", ") ?? "";
+    const start = safeLocalTime(appointment.startTime);
+    const end = safeLocalTime(appointment.endTime);
+    return `  - ${start}-${end} | ${appointment.clientName} | ${services} | Prof: ${employee?.name ?? "?"} | ${appointment.status} | ID:${appointment.id}`;
+  });
+
+  return `Agendamentos hoje (${today}):\n${lines.join("\n")}`;
+}
+
+function getServicesData(): string {
+  const services = servicesStore.list(true);
+  if (services.length === 0) return "Nenhum serviço cadastrado.";
+  return `Serviços disponíveis:\n${services
+    .map((service) => `  - ID:${service.id} | ${service.name} | R$${service.price.toFixed(2)} | ${service.durationMinutes}min`)
+    .join("\n")}`;
+}
+
+function getEmployeesData(): string {
+  const employees = employeesStore.list(true);
+  if (employees.length === 0) return "Nenhum profissional ativo.";
+
+  return `Profissionais ativos:\n${employees
+    .map((employee) => {
+      const wh = employee.workingHours;
+      let hoursInfo = "";
+
+      if (wh && Object.keys(wh).length > 1) {
+        const keyToLabel: Record<string, string> = {
+          "0": "Dom",
+          dom: "Dom",
+          domingo: "Dom",
+          "1": "Seg",
+          seg: "Seg",
+          segunda: "Seg",
+          "2": "Ter",
+          ter: "Ter",
+          terca: "Ter",
+          terça: "Ter",
+          "3": "Qua",
+          qua: "Qua",
+          quarta: "Qua",
+          "4": "Qui",
+          qui: "Qui",
+          quinta: "Qui",
+          "5": "Sex",
+          sex: "Sex",
+          sexta: "Sex",
+          "6": "Sab",
+          sab: "Sab",
+          sabado: "Sab",
+          sábado: "Sab",
+        };
+        const activeDays = Object.entries(wh)
+          .filter(([, value]) => value && value.active)
+          .map(([key, value]) => `${keyToLabel[key.toLowerCase()] ?? key}: ${value.start}-${value.end}`)
+          .join(", ");
+        if (activeDays) hoursInfo = ` | Horários: ${activeDays}`;
+      } else if (wh && Object.keys(wh).length === 1) {
+        hoursInfo = " | Horários: Seg-Sáb: 07:00-18:00";
+      }
+
+      return `  - ID:${employee.id} | ${employee.name} | Comissão: ${employee.commissionPercent}%${hoursInfo}`;
+    })
+    .join("\n")}`;
+}
+
+function getApptsByDate(dateStr: string): string {
+  const date = resolveDate(dateStr);
+  const appointments = appointmentsStore.list({ date });
+  const employees = employeesStore.list(true);
+  if (appointments.length === 0) return `Nenhum agendamento em ${date}.`;
+
+  const byEmployee = new Map<number, Appointment[]>();
+  for (const appointment of appointments) {
+    if (!byEmployee.has(appointment.employeeId)) byEmployee.set(appointment.employeeId, []);
+    byEmployee.get(appointment.employeeId)?.push(appointment);
+  }
+
+  const lines: string[] = [
+    `Agendamentos de ${date} por profissional (ATENÇÃO: conflito só bloqueia o profissional específico):`,
+  ];
+
+  for (const [employeeId, employeeAppointments] of byEmployee.entries()) {
+    const employee = employees.find((item) => item.id === employeeId);
+    lines.push(`  [${employee?.name ?? "?"}]:`);
+    for (const appointment of employeeAppointments) {
+      if (appointment.status === "cancelled") continue;
+      const start = safeLocalTime(appointment.startTime);
+      const end = safeLocalTime(appointment.endTime);
+      const services = appointment.services?.map((s) => s.name).join(", ") ?? "";
+      lines.push(`    - ${start}-${end} OCUPADO: ${appointment.clientName} | ${services} | ID:${appointment.id}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+async function getClientWithHistory(query: string): Promise<string> {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    let totalStr = "(indisponível)";
+    try {
+      totalStr = String(await clientsStore.count());
+    } catch {
+      // ignore
+    }
+    return `Total clientes: ${totalStr}`;
+  }
+
+  let found: Awaited<ReturnType<typeof clientsStore.search>> = [];
+  try {
+    found = await clientsStore.search(trimmed, { limit: 15 });
+  } catch (err) {
+    console.warn("[ai-agent] busca de clientes falhou:", err);
+  }
+
+  if (found.length === 0) {
+    let totalStr = "(indisponível)";
+    try {
+      totalStr = String(await clientsStore.count());
+    } catch {
+      // ignore
+    }
+    return `Nenhum cliente encontrado com "${query}". Total no sistema: ${totalStr}.`;
+  }
+
+  let recentAppointments: Appointment[] = [];
+  try {
+    recentAppointments = await appointmentsStore.fetchByClientIds(found.map((client) => client.id));
+  } catch {
+    // ignore
+  }
+
+  const lastByClient = new Map<number, Appointment>();
+  for (const appointment of recentAppointments) {
+    if (appointment.clientId && !lastByClient.has(appointment.clientId)) {
+      lastByClient.set(appointment.clientId, appointment);
+    }
+  }
+
+  const lines = found.map((client) => {
+    let line = `  - ID:${client.id} | ${client.name}`;
+    if (client.phone) line += ` | ${client.phone}`;
+    const last = lastByClient.get(client.id);
+    if (last) {
+      const lastService = last.services?.[0]?.name ?? "";
+      const lastDate = last.startTime?.split("T")[0] ?? "";
+      line += ` | Último serviço: ${lastService} em ${lastDate}`;
+    }
+    return line;
+  });
+
+  return `Clientes encontrados (${found.length}):\n${lines.join("\n")}`;
+}
+
+function getFinancialSummary(scope: "dia" | "semana" | "mes"): string {
+  const periodMap: Record<"dia" | "semana" | "mes", "hoje" | "semana" | "mes"> = {
+    dia: "hoje",
+    semana: "semana",
+    mes: "mes",
+  };
+
+  const { start, end } = getPeriodDates(periodMap[scope]);
+  const employees = employeesStore.list(false);
+  const appointments = getAppointmentsInPeriod(start, end);
+  const stats = calcPeriodStats(appointments, employees);
+  const byEmployee = calcRevenueByEmployee(appointments, employees);
+  const popular = calcPopularServices(appointments);
+
+  const lines: string[] = [
+    `Financeiro (${scope}):`,
+    `  Faturamento bruto: R$ ${stats.totalRevenue.toFixed(2)}`,
+    `  Custos de material: R$ ${stats.totalMaterial.toFixed(2)}`,
+    `  Comissões: R$ ${stats.totalCommissions.toFixed(2)}`,
+    `  Líquido: R$ ${stats.netRevenue.toFixed(2)}`,
+    `  Atendimentos: ${stats.count}`,
+    `  Ticket médio: R$ ${stats.avgTicket.toFixed(2)}`,
+    `  Cancelamentos: ${stats.cancelCount} (${stats.cancelRate.toFixed(1)}%)`,
+  ];
+
+  if (byEmployee.length > 0) {
+    lines.push("  Comissões por profissional:");
+    for (const employee of byEmployee.slice(0, 5)) {
+      lines.push(
+        `    - ${employee.name}: R$ ${employee.revenue.toFixed(2)} faturado | R$ ${employee.commission.toFixed(2)} comissão (${employee.commissionPercent}%) | ${employee.count} atend.`,
+      );
+    }
+  }
+
+  if (popular.length > 0) {
+    lines.push("  Serviços mais rentáveis:");
+    for (const service of popular.slice(0, 5)) {
+      lines.push(`    - ${service.name}: ${service.count}x | R$ ${service.revenue.toFixed(2)}`);
+    }
+  }
+
+  const currentCash = cashSessionsStore.getCurrent();
+  if (!currentCash) {
+    lines.push("  ⚠ ALERTA: Caixa NÃO está aberto!");
+  } else {
+    lines.push(`  Caixa: aberto desde ${new Date(currentCash.openedAt).toLocaleString("pt-BR")}`);
+  }
+
+  return lines.join("\n");
+}
+
+async function gatherData(message: string, history: MensagemConversa[] = []): Promise<string> {
+  const lower = normalizeText(message);
+  const parts: string[] = [getTodayData(), getEmployeesData(), getServicesData()];
+
+  const candidateNames = extractCandidateNames(message, history);
+  if (candidateNames.length > 0) {
+    let clientData = "";
+    for (const candidate of candidateNames.slice(0, 3)) {
+      const result = await getClientWithHistory(candidate);
+      if (!result.startsWith("Nenhum cliente") && !result.startsWith("Total")) {
+        clientData = result;
+        break;
+      }
+    }
+    if (!clientData && candidateNames.length > 1) {
+      clientData = await getClientWithHistory(candidateNames.slice(0, 2).join(" "));
+    }
+    if (!clientData) {
+      clientData = await getClientWithHistory(candidateNames[0]);
+    }
+    parts.push(clientData);
+  } else {
+    let totalStr = "(indisponível)";
+    try {
+      totalStr = String(await clientsStore.count());
+    } catch {
+      // ignore
+    }
+    parts.push(`Total clientes cadastrados: ${totalStr}. Use busca por nome para localizar.`);
+  }
+
+  const fullContext = `${message} ${history.slice(-6).map((item) => item.content).join(" ")}`;
+  const dateMatch = fullContext.match(
+    /\b(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|amanha|amanhã|segunda|terca|terça|quarta|quinta|sexta|sabado|sábado|domingo)\b/i,
+  );
+  if (dateMatch) parts.push(getApptsByDate(dateMatch[1]));
+
+  if (/faturamento|financeiro|receita|comiss[aã]o|rendimento|lucro|ganho|caixa/.test(lower)) {
+    let scope: "dia" | "semana" | "mes" = "dia";
+    if (/semana/.test(lower)) scope = "semana";
+    else if (/mes|mês/.test(lower)) scope = "mes";
+    parts.push(getFinancialSummary(scope));
+  }
+
+  return parts.join("\n\n");
+}
+
+function buildSystemPrompt(): string {
+  const dateStr = new Date().toLocaleDateString("pt-BR", {
+    weekday: "long",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+
+  return `Você é o Agente IA do Domínio Pro.
+Data atual: ${dateStr}
+
+Você gerencia agendamentos, clientes, serviços, profissionais e financeiro.
+Dados reais do sistema são fornecidos em cada mensagem — use-os com precisão.
+
+REGRAS:
+1. Responda em português brasileiro, direto e natural.
+2. Você TEM ACESSO aos dados reais do sistema injetados no prompt.
+3. Nunca diga que não tem acesso aos dados se eles estiverem no contexto.
+4. Não confunda lista de clientes com lista de profissionais.
+5. Para agendar: CLIENTE recebe o serviço; PROFISSIONAL executa.
+6. Se houver mais de um profissional e o usuário não informou qual, pergunte.
+7. Se houver apenas um profissional ativo, você pode usar esse automaticamente.
+8. Mantenha contexto — se o cliente já foi identificado, não peça novamente.
+9. Quando cliente recorrente é identificado e serviço não foi informado, você pode sugerir o último serviço.
+10. Use os horários de trabalho dos profissionais fornecidos nos dados.
+11. Quando o usuário perguntar sobre financeiro, use os dados financeiros fornecidos.
+12. Se o caixa não estiver aberto e o usuário perguntar sobre financeiro, mencione isso. Nunca bloqueie agendamentos por causa do caixa.
+13. HORÁRIOS OCUPADOS: cada agendamento bloqueia apenas o profissional daquele agendamento.
+14. Nunca anuncie execução antes do retorno do sistema.
+15. Se tiver todos os dados necessários, inclua o bloco action imediatamente.
+16. Se faltar informação, pergunte objetivamente o que falta.
+17. Não invente clientId nem employeeId; use os IDs reais dos dados injetados.
+18. Nunca use a agenda como substituta do cadastro de clientes.
+
+AÇÕES — inclua ao final da resposta quando executar operação:
+\`\`\`action
+{"type":"agendar","params":{"clientName":"Nome Exato","serviceId":45,"employeeId":2,"date":"hoje","time":"14:00"}}
+\`\`\`
+
+Tipos: agendar | cancelar | mover | concluir | criar_cliente | trocar_cliente
+- agendar: {clientName, serviceId, employeeId, date, time}
+- cancelar: {appointmentId}
+- mover: {appointmentId, newDate, newTime}
+- concluir: {appointmentId}
+- criar_cliente: {name, phone?}
+- trocar_cliente: {appointmentId, newClientName}
+
+IMPORTANTE:
+- Use o nome EXATO do cliente como aparece nos dados.
+- Se houver múltiplos clientes com o mesmo nome, pergunte qual deles.
+- Se cliente não existe no sistema, use criar_cliente antes de agendar.
+- O sistema verifica conflito automaticamente, mas você deve respeitar os dados para sugerir horários.
+- Não inclua bloco action se faltarem dados.`;
+}
+
+async function callLLM(
+  systemPrompt: string,
+  history: MensagemConversa[],
+  userMessage: string,
+  data: string,
+): Promise<string> {
+  const proxyToken = import.meta.env.VITE_GITHUB_MODELS_TOKEN as string | undefined;
+  const groqToken = import.meta.env.VITE_GROQ_API_KEY as string | undefined;
+
+  const messages = [
+    { role: "system", content: systemPrompt },
+    { role: "system", content: `=== DADOS DO SISTEMA ===\n${data}\n=== FIM DOS DADOS ===` },
+    ...history,
+    { role: "user", content: userMessage },
+  ];
+
+  const ctrl = new AbortController();
+  const tmr = setTimeout(() => ctrl.abort(), 25_000);
+
+  try {
+    let response: Response;
+
+    if (groqToken) {
+      response = await fetch(GROQ_ENDPOINT, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${groqToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          messages,
+          temperature: 0.2,
+          max_tokens: 1200,
+        }),
+        signal: ctrl.signal,
+      });
+    } else {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (proxyToken) headers["x-github-token"] = proxyToken;
+
+      response = await fetch(proxyToken ? LLM_PROXY : GITHUB_LLM_ENDPOINT, {
+        method: "POST",
+        headers: proxyToken
+          ? headers
+          : {
+              ...headers,
+              Authorization: `Bearer ${proxyToken ?? ""}`,
+            },
+        body: JSON.stringify({
+          model: "openai/gpt-4o-mini",
+          messages,
+          temperature: 0.2,
+          max_tokens: 1200,
+        }),
+        signal: ctrl.signal,
+      });
+    }
+
+    clearTimeout(tmr);
+
+    if (!response.ok) {
+      if (response.status === 401) throw new Error("Token inválido da IA.");
+      if (response.status === 429) throw new Error("Limite de requisições atingido. Aguarde alguns segundos.");
+      throw new Error(`Erro ${response.status}`);
+    }
+
+    const json = await response.json();
+    return json?.choices?.[0]?.message?.content ?? "";
+  } catch (err) {
+    clearTimeout(tmr);
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error("Timeout — tente novamente.");
+    }
+    throw err;
+  }
+}
+
+async function findClientByName(paramClientName: string | null): Promise<Awaited<ReturnType<typeof clientsStore.ensureLoaded>>[number] | null> {
+  if (!paramClientName) return null;
+
+  const allClients = await clientsStore.ensureLoaded();
+  const nameLower = paramClientName.toLowerCase().trim();
+
+  let client = allClients.find((c) => c.name.toLowerCase() === nameLower) ?? null;
+
+  if (!client) {
+    client =
+      allClients.find((c) => {
+        const cn = c.name.toLowerCase();
+        return cn.includes(nameLower) || nameLower.includes(cn);
+      }) ?? null;
+  }
+
+  if (!client) {
+    const firstName = nameLower.split(" ")[0];
+    if (firstName.length > 2) {
+      const matches = allClients.filter((c) => c.name.toLowerCase().includes(firstName));
+      if (matches.length === 1) {
+        client = matches[0];
+      } else if (matches.length > 1) {
+        return null;
+      }
+    }
+  }
+
+  if (!client) {
+    try {
+      const found = await clientsStore.search(paramClientName, { limit: 10 });
+      if (found.length === 1) client = found[0];
+    } catch {
+      // ignore
+    }
+  }
+
+  return client;
+}
+
+async function executeCreateClient(params: Record<string, unknown>): Promise<string> {
+  const name = params.name ? String(params.name).trim() : null;
+  if (!name) return "Nome do cliente é obrigatório para criar o cadastro.";
+
+  const allClients = await clientsStore.ensureLoaded();
+  const exists = allClients.find((client) => client.name.toLowerCase() === name.toLowerCase());
+  if (exists) {
+    return `Cliente "${exists.name}" já existe no sistema (ID:${exists.id}). Use este cliente para agendar.`;
+  }
+
+  const phone = params.phone ? String(params.phone).trim() : null;
+  const created = await clientsStore.create({
+    name,
+    phone: phone || null,
+    email: null,
+    birthDate: null,
+    cpf: null,
+    address: null,
+    notes: null,
+  });
+
+  window.dispatchEvent(new Event("store_updated"));
+  return `Cliente "${created.name}" criado com sucesso! ID:${created.id}. Agora pode agendar normalmente.`;
+}
+
+async function executeSwapClient(params: Record<string, unknown>): Promise<string> {
+  const appointmentId = Number(params.appointmentId);
+  const newClientName = params.newClientName ? String(params.newClientName).trim() : null;
+  if (!newClientName) return "Nome do novo cliente é obrigatório.";
+
+  const appointment = appointmentsStore.list({}).find((item) => item.id === appointmentId);
+  if (!appointment) return `Agendamento ID:${appointmentId} não encontrado.`;
+
+  const allClients = await clientsStore.ensureLoaded();
+  const lower = newClientName.toLowerCase();
+  let client = allClients.find((c) => c.name.toLowerCase() === lower) ?? null;
+
+  if (!client) {
+    client =
+      allClients.find((c) => c.name.toLowerCase().includes(lower) || lower.includes(c.name.toLowerCase())) ?? null;
+  }
+
+  if (!client) {
+    try {
+      const found = await clientsStore.search(newClientName, { limit: 5 });
+      if (found.length === 1) {
+        client = found[0];
+      } else if (found.length > 1) {
+        const names = found.slice(0, 5).map((c) => `${c.name} (ID:${c.id})`).join(", ");
+        return `Encontrei vários clientes com "${newClientName}": ${names}. Qual deles?`;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!client) return `Cliente "${newClientName}" não encontrado. Verifique o cadastro.`;
+
+  await appointmentsStore.update(appointmentId, {
+    clientName: client.name,
+    clientId: client.id,
+  });
+  window.dispatchEvent(new Event("store_updated"));
+  return `Cliente trocado com sucesso!\nAgendamento ID:${appointmentId}\nNovo cliente: ${client.name}`;
+}
+
+async function executeCancel(params: Record<string, unknown>): Promise<string> {
+  const appointmentId = Number(params.appointmentId);
+  const appointment = appointmentsStore.list({}).find((item) => item.id === appointmentId);
+  if (!appointment) return `Agendamento ID:${appointmentId} não encontrado.`;
+  if (appointment.status === "cancelled") return `Agendamento ID:${appointmentId} já está cancelado.`;
+
+  await appointmentsStore.update(appointmentId, { status: "cancelled" });
+  window.dispatchEvent(new Event("store_updated"));
+  return `Agendamento ID:${appointmentId} cancelado com sucesso.\nCliente: ${appointment.clientName}\nHorário: ${safeLocalTime(appointment.startTime)}`;
+}
+
+async function executeMove(params: Record<string, unknown>): Promise<string> {
+  const appointmentId = Number(params.appointmentId);
+  const appointment = appointmentsStore.list({}).find((item) => item.id === appointmentId);
+  if (!appointment) return `Agendamento ID:${appointmentId} não encontrado.`;
+
+  const resolvedDate = resolveDate(String(params.newDate ?? ""));
+  const resolvedTime = normalizeTime(String(params.newTime ?? ""));
+  if (!resolvedTime) return `Horário inválido: "${params.newTime}". Use HH:MM.`;
+
+  const durationMs = new Date(appointment.endTime).getTime() - new Date(appointment.startTime).getTime();
+  const [year, month, day] = resolvedDate.split("-").map(Number);
+  const [hour, minute] = resolvedTime.split(":").map(Number);
+  const newStartDt = new Date(year, month - 1, day, hour, minute, 0);
+  const newStart = newStartDt.toISOString().slice(0, 19);
+  const newEnd = new Date(newStartDt.getTime() + durationMs).toISOString().slice(0, 19);
+
+  const employee = employeesStore.list(true).find((item) => item.id === appointment.employeeId);
+  if (employee) {
+    const whCheck = isWithinWorkingHours(employee, resolvedDate, resolvedTime);
+    if (!whCheck.ok) return whCheck.message!;
+  }
+
+  const conflict = appointmentsStore.list({ date: resolvedDate }).find((item) => {
+    if (item.id === appointment.id || item.employeeId !== appointment.employeeId || item.status === "cancelled") return false;
+    const start = new Date(item.startTime).getTime();
+    const end = new Date(item.endTime).getTime();
+    const reqStart = new Date(newStart).getTime();
+    const reqEnd = new Date(newEnd).getTime();
+    return reqStart < end && reqEnd > start;
+  });
+
+  if (conflict && !params.forceConflict) {
+    savePendingAction({ type: "mover", params: { ...params, forceConflict: true } }, "conflict");
+    return `CONFLITO:${employee?.name ?? "Profissional"} já tem agendamento das ${safeLocalTime(conflict.startTime)} às ${safeLocalTime(conflict.endTime)} (${conflict.clientName ?? "cliente"}). Para forçar, confirme explicitamente.`;
+  }
+
+  await appointmentsStore.update(appointment.id, { startTime: newStart, endTime: newEnd });
+  window.dispatchEvent(new Event("store_updated"));
+  return `Agendamento movido com sucesso!\nCliente: ${appointment.clientName}\nNovo horário: ${resolvedDate} às ${resolvedTime}`;
+}
+
+async function executeComplete(params: Record<string, unknown>): Promise<string> {
+  const appointmentId = Number(params.appointmentId);
+  const appointment = appointmentsStore.list({}).find((item) => item.id === appointmentId);
+  if (!appointment) return `Agendamento ID:${appointmentId} não encontrado.`;
+
+  await appointmentsStore.update(appointmentId, { status: "completed" });
+  window.dispatchEvent(new Event("store_updated"));
+  return `Agendamento ID:${appointmentId} concluído!\nCliente: ${appointment.clientName}`;
+}
+
+async function executeSchedule(params: Record<string, unknown>): Promise<{ text: string; appointment?: Appointment }> {
+  const serviceId = params.serviceId != null ? Number(params.serviceId) : null;
+  const employeeId = params.employeeId != null ? Number(params.employeeId) : null;
+  const date = String(params.date ?? "hoje");
+  const time = String(params.time ?? "");
+  const paramClientName = params.clientName ? String(params.clientName) : null;
+
+  const resolvedDate = resolveDate(date);
+  const resolvedTime = normalizeTime(time);
+  if (!resolvedTime) {
+    return { text: `Horário inválido: "${time}". Use formato HH:MM.` };
+  }
+
+  const allClients = await clientsStore.ensureLoaded();
+  let client = await findClientByName(paramClientName);
+
+  if (!client && paramClientName) {
+    const firstName = paramClientName.toLowerCase().trim().split(" ")[0];
+    const matches = allClients.filter((c) => c.name.toLowerCase().includes(firstName));
+    if (matches.length > 1) {
+      const names = matches.slice(0, 5).map((c) => `${c.name} (ID:${c.id})`).join(", ");
+      return { text: `Encontrei vários clientes com "${paramClientName}": ${names}. Qual deles?` };
+    }
+  }
+
+  if (!client) {
+    return { text: `Cliente "${paramClientName ?? "desconhecido"}" não encontrado no sistema. Verifique o cadastro.` };
+  }
+
+  const service = serviceId ? servicesStore.list(true).find((item) => item.id === serviceId) ?? null : null;
+  if (!service) {
+    const services = servicesStore.list(true);
+    if (services.length === 0) return { text: "Nenhum serviço cadastrado no sistema." };
+    return {
+      text: `Serviço ID:${serviceId} não encontrado. Disponíveis: ${services.map((item) => `${item.name} (ID:${item.id})`).join(", ")}`,
+    };
+  }
+
+  const employees = employeesStore.list(true);
+  if (employees.length === 0) return { text: "Nenhum profissional ativo no sistema." };
+
+  let employee: Employee | null = employeeId ? employees.find((item) => item.id === employeeId) ?? null : null;
+  if (!employee && employees.length === 1) employee = employees[0];
+  if (!employee) {
+    savePendingAction(
+      { type: "agendar", params: { ...params, clientName: client.name } },
+      "professional",
     );
+    return {
+      text: `AGUARDANDO_PROFISSIONAL:${employees.map((item) => `${item.name} (ID:${item.id})`).join(", ")}`,
+    };
+  }
 
-  return { texto: lines.join("\n") };
-}
+  const workingHoursCheck = isWithinWorkingHours(employee, resolvedDate, resolvedTime);
+  if (!workingHoursCheck.ok) return { text: workingHoursCheck.message! };
 
-function queryAvailable(msg: string): ResultadoAgente {
-  const date = getDateForQuery(msg);
-  const time = extractTime(msg);
-  const employees = getActiveEmployees();
+  const durationMinutes = service.durationMinutes > 0 ? service.durationMinutes : 60;
+  const [year, month, day] = resolvedDate.split("-").map(Number);
+  const [hour, minute] = resolvedTime.split(":").map(Number);
+  const startDt = new Date(year, month - 1, day, hour, minute, 0);
+  const endDt = new Date(startDt.getTime() + durationMinutes * 60_000);
+  const startTime = startDt.toISOString().slice(0, 19);
+  const endTime = endDt.toISOString().slice(0, 19);
 
-  const free = time
-    ? employees.filter((employee) => {
-        const dayAppointments = appointmentsStore.list({
-          date,
-          employeeId: employee.id,
-        });
+  const conflict = appointmentsStore.list({ date: resolvedDate }).find((item) => {
+    if (item.employeeId !== employee!.id || item.status === "cancelled") return false;
+    const start = new Date(item.startTime).getTime();
+    const end = new Date(item.endTime).getTime();
+    const reqStart = new Date(startTime).getTime();
+    const reqEnd = new Date(endTime).getTime();
+    return reqStart < end && reqEnd > start;
+  });
 
-        return !dayAppointments.some((appointment) => {
-          if (appointment.status === "cancelled") return false;
-          const start = new Date(appointment.startTime).toLocaleTimeString("pt-BR", {
-            hour: "2-digit",
-            minute: "2-digit",
-          });
-          return start === time;
-        });
-      })
-    : employees;
+  if (conflict && !params.forceConflict) {
+    savePendingAction(
+      { type: "agendar", params: { ...params, clientName: client.name, forceConflict: true } },
+      "conflict",
+    );
+    return {
+      text: `CONFLITO:${employee.name} já tem agendamento das ${safeLocalTime(conflict.startTime)} às ${safeLocalTime(conflict.endTime)} (${conflict.clientName ?? "cliente"}). Para forçar mesmo assim, confirme explicitamente.`,
+    };
+  }
 
+  const serviceData: AppointmentService = {
+    serviceId: service.id,
+    name: service.name,
+    price: service.price,
+    durationMinutes: service.durationMinutes ?? 60,
+    color: service.color ?? "#ec4899",
+    materialCostPercent: service.materialCostPercent ?? 0,
+  };
+
+  const created = await appointmentsStore.create({
+    clientName: client.name,
+    clientId: client.id,
+    employeeId: employee.id,
+    startTime,
+    endTime,
+    status: "scheduled",
+    totalPrice: service.price,
+    notes: null,
+    paymentStatus: null,
+    groupId: null,
+    services: [serviceData],
+  });
+
+  window.dispatchEvent(new Event("store_updated"));
   return {
-    texto: free.length
-      ? `Livres: ${free.map((employee) => employee.name).join(", ")}`
-      : "Nenhum profissional livre nesse horário.",
+    text: [
+      "Agendamento criado com sucesso!",
+      `ID: ${created.id}`,
+      `Cliente: ${client.name}`,
+      `Serviço: ${service.name} (${durationMinutes}min)`,
+      `Data: ${resolvedDate} às ${resolvedTime}`,
+      `Profissional: ${employee.name}`,
+    ].join("\n"),
+    appointment: created,
   };
 }
 
-function queryFinance(msg: string): ResultadoAgente {
-  const date = getDateForQuery(msg);
-  const current = cashSessionsStore.getCurrent();
-
-  const completed = appointmentsStore
-    .list({ date })
-    .filter((appointment) => appointment.status === "completed");
-
-  const total = completed.reduce(
-    (sum, appointment) => sum + Number(appointment.totalPrice ?? 0),
-    0,
-  );
-
-  if (/caixa/.test(normalizar(msg))) {
-    return { texto: current ? "Caixa aberto." : "Caixa fechado." };
+async function executeAction(action: ActionPayload): Promise<{ text: string; appointment?: Appointment }> {
+  try {
+    if (action.type === "agendar") return executeSchedule(action.params);
+    if (action.type === "cancelar") return { text: await executeCancel(action.params) };
+    if (action.type === "mover") return { text: await executeMove(action.params) };
+    if (action.type === "concluir") return { text: await executeComplete(action.params) };
+    if (action.type === "criar_cliente") return { text: await executeCreateClient(action.params) };
+    if (action.type === "trocar_cliente") return { text: await executeSwapClient(action.params) };
+    return { text: `Ação desconhecida: "${action.type}".` };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { text: `Erro ao executar "${action.type}": ${message}` };
   }
-
-  return {
-    texto: `Faturamento de ${formatDateLong(date)}: R$ ${total.toFixed(2)}`,
-  };
 }
 
-function buildSystemPrompt(userMessage: string): string {
-  const services = getActiveServices().sort((a, b) =>
-    a.name.localeCompare(b.name, "pt-BR"),
-  );
-  const employees = getActiveEmployees().sort((a, b) =>
-    a.name.localeCompare(b.name, "pt-BR"),
-  );
-
-  const clientQuery = stripForClientCandidate(userMessage).trim() || userMessage.trim();
-
-  const clients = clientsStore.list().sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
-
-  const matchingClients = clientQuery
-    ? clients
-        .filter((client) => normalizar(client.name).includes(normalizar(clientQuery)))
-        .slice(0, 20)
-    : [];
-
-  return [
-    "Você é o assistente do salão Domínio Pro.",
-    "Responda em pt-BR, curto e direto.",
-    "Nunca invente dados.",
-    "Não execute ações do sistema.",
-    "FONTES DE VERDADE:",
-    "- Cliente: cadastro real de clientes.",
-    "- Agendamento: agenda real.",
-    "- Profissional: cadastro de profissionais.",
-    "- Serviço: cadastro de serviços.",
-    "- Financeiro: caixa e agendamentos concluídos.",
-    "Nunca use agenda como substituta da lista de clientes.",
-    "",
-    "SERVIÇOS CADASTRADOS:",
-    services.map((service) => `- ${service.name}`).join("\n") || "- nenhum",
-    "",
-    "PROFISSIONAIS CADASTRADOS:",
-    employees.map((employee) => `- ${employee.name}`).join("\n") || "- nenhum",
-    "",
-    "CLIENTES DO CADASTRO REAL ENCONTRADOS PARA A BUSCA:",
-    matchingClients.map((client) => `- ${client.name}`).join("\n") || "- nenhum",
-  ].join("\n");
+function isLikelyActionRequest(text: string): boolean {
+  return /\b(agendar|marcar|agenda|cancelar|desmarcar|reagendar|mover|remarcar|concluir|finalizar)\b/i.test(text);
 }
 
-async function answerWithLLM(
-  mensagemUsuario: string,
-  historicoConversa: MensagemConversa[],
-): Promise<ResultadoAgente> {
-  const body = JSON.stringify({
-    model: "llama-3.3-70b-versatile",
-    messages: [
-      { role: "system", content: buildSystemPrompt(mensagemUsuario) },
-      ...historicoConversa.slice(-6),
-      { role: "user", content: mensagemUsuario },
-    ],
-    temperature: 0.2,
-    max_tokens: 300,
-  });
+function claimsActionSuccess(text: string): boolean {
+  return /\b(agendei|agendado com sucesso|marquei|cancelei|cancelado com sucesso|movi|reagendei|conclui|concluido com sucesso|concluído com sucesso|feito|realizando o agendamento|vou agendar|agendamento realizado|efetuando|executando|processando o agendamento)\b/i.test(
+    text,
+  );
+}
 
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${import.meta.env.VITE_GROQ_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body,
-  });
+function stripCodeBlocks(text: string): string {
+  return text.replace(/```[\s\S]*?```/g, "").trim();
+}
 
-  if (!response.ok) {
-    throw new Error(`Groq ${response.status}`);
+function extractActionFromResponse(raw: string): ActionPayload | null {
+  const match = raw.match(/```action\s*([\s\S]*?)```/i);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]) as ActionPayload;
+  } catch {
+    return null;
+  }
+}
+
+async function forceExtractAction(
+  userMessage: string,
+  history: MensagemConversa[],
+  systemData: string,
+): Promise<ActionPayload | null> {
+  const recentMsgs = history.slice(-6).map((m) => `${m.role === "user" ? "Usuário" : "Assistente"}: ${m.content}`).join("\n");
+
+  const raw = await callLLM(
+    `Você é um extrator de JSON para operações de salão de beleza.
+Analise o histórico da conversa e os dados do sistema.
+Responda APENAS com JSON puro, sem markdown, sem explicação.
+Formato: {"type":"agendar","params":{...}}
+Se não houver dados suficientes, responda apenas {}.`,
+    [],
+    `=== HISTÓRICO RECENTE ===\n${recentMsgs}\n\n=== MENSAGEM ATUAL ===\n${userMessage}\n\n=== DADOS DO SISTEMA ===\n${systemData}`,
+    "",
+  );
+
+  const cleaned = stripCodeBlocks(raw);
+  if (!cleaned || cleaned === "{}") return null;
+
+  try {
+    const parsed = JSON.parse(cleaned) as ActionPayload;
+    if (!parsed.type || !parsed.params) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function handlePendingAction(pending: PendingAction, userMessage: string): Promise<ResultadoAgente | null> {
+  if (pending.type === "conflict") {
+    if (/forç|forcar|força|mesmo\s*assim|pode|sim|confirma|confirmar|ok|claro|vai|manda|force|agendar/i.test(userMessage)) {
+      clearPendingAction();
+      addToHistory("user", userMessage);
+      const result = await executeAction(pending.action);
+      const text = result.text;
+      addToHistory("assistant", text);
+      return {
+        texto: text,
+        agendamentoCriado: result.appointment,
+      };
+    }
+
+    if (/nao|não|cancela|deixa|esquece|outro|nada/i.test(userMessage)) {
+      clearPendingAction();
+      addToHistory("user", userMessage);
+      const text = "Ok, agendamento não realizado. Como posso ajudar?";
+      addToHistory("assistant", text);
+      return { texto: text };
+    }
+
+    clearPendingAction();
+    return null;
   }
 
-  const data = await response.json();
-  const texto =
-    data.choices?.[0]?.message?.content?.trim() || "Não consegui responder agora.";
+  if (pending.type === "professional") {
+    const employees = employeesStore.list(true);
+    const lower = userMessage.toLowerCase();
+    const employee =
+      employees.find(
+        (item) =>
+          item.name.toLowerCase() === lower ||
+          item.name.toLowerCase().includes(lower) ||
+          lower.includes(item.name.toLowerCase()),
+      ) ?? null;
 
-  return { texto };
+    if (employee) {
+      clearPendingAction();
+      addToHistory("user", userMessage);
+      const updatedAction: ActionPayload = {
+        ...pending.action,
+        params: { ...pending.action.params, employeeId: employee.id },
+      };
+      const result = await executeAction(updatedAction);
+      let text = result.text;
+
+      if (text.startsWith("CONFLITO:")) {
+        text = `Conflito de horário: ${text.replace("CONFLITO:", "")}\nDeseja agendar mesmo assim? Responda \"sim\" para confirmar.`;
+      } else if (text.startsWith("AGUARDANDO_PROFISSIONAL:")) {
+        text = `Com qual profissional deseja agendar? Disponíveis: ${text.replace("AGUARDANDO_PROFISSIONAL:", "")}`;
+      }
+
+      addToHistory("assistant", text);
+      return {
+        texto: text,
+        agendamentoCriado: result.appointment,
+      };
+    }
+
+    clearPendingAction();
+    return null;
+  }
+
+  return null;
+}
+
+export function addFeedback(userMessage: string, agentResponse: string, rating: "good" | "bad"): void {
+  try {
+    const raw = getStorage()?.getItem(FEEDBACK_KEY);
+    const current = raw ? (JSON.parse(raw) as FeedbackItem[]) : [];
+    const next: FeedbackItem[] = [
+      {
+        id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        rating,
+        userMessage,
+        agentResponse,
+        createdAt: new Date().toISOString(),
+      },
+      ...current,
+    ].slice(0, 200);
+    getStorage()?.setItem(FEEDBACK_KEY, JSON.stringify(next));
+  } catch {
+    // ignore
+  }
 }
 
 export async function executarAgente(
   mensagemUsuario: string,
-  historicoConversa: MensagemConversa[] = [],
+  _historicoConversa: MensagemConversa[] = [],
 ): Promise<ResultadoAgente> {
   try {
+    const msgTrimmed = mensagemUsuario.trim();
+    if (!msgTrimmed) return { texto: "Envie uma mensagem." };
+
     await ensureBaseLoaded();
 
-    const msg = mensagemUsuario.trim();
-    if (!msg) return { texto: "Envie uma mensagem." };
+    const pendingFeedback = handleFeedbackMessage(msgTrimmed, loadDraft());
+    if (pendingFeedback) return pendingFeedback;
 
-    const currentDraft = loadDraft();
+    const pendingLearning = handlePendingLearningAnswer(msgTrimmed);
+    if (pendingLearning) return pendingLearning;
 
-    const feedbackResult = handleFeedbackMessage(msg, currentDraft);
-    if (feedbackResult) return feedbackResult;
-
-    const pendingLearningAnswer = handlePendingLearningAnswer(msg);
-    if (pendingLearningAnswer) return pendingLearningAnswer;
-
-    if (currentDraft?.flow === "schedule") {
-      return await handleScheduleFlow(msg);
+    const pending = loadPendingAction();
+    if (pending) {
+      const pendingResult = await handlePendingAction(pending, msgTrimmed);
+      if (pendingResult) return pendingResult;
     }
 
-    switch (detectIntent(msg)) {
-      case "schedule":
-        return await handleScheduleFlow(msg);
+    addToHistory("user", msgTrimmed);
+    const history = loadHistory().slice(0, -1);
 
-      case "query_schedule":
-        return querySchedule(msg);
+    const systemData = await gatherData(msgTrimmed, history);
+    const raw = await callLLM(buildSystemPrompt(), history, msgTrimmed, systemData);
 
-      case "query_finance":
-        return queryFinance(msg);
+    let text = raw;
+    let agendamentoCriado: Appointment | undefined;
 
-      case "query_client":
-        return await queryClient(msg);
-
-      case "query_available":
-        return queryAvailable(msg);
-
-      case "cancel":
-      case "reschedule":
-        return {
-          texto:
-            "Esse fluxo ainda não foi refeito nesta versão do agente. Foquei primeiro em corrigir o agendamento.",
-        };
-
-      default:
-        return await answerWithLLM(msg, historicoConversa);
+    let action = extractActionFromResponse(raw);
+    if (!action && isLikelyActionRequest(msgTrimmed) && claimsActionSuccess(raw)) {
+      try {
+        action = await forceExtractAction(msgTrimmed, history, systemData);
+      } catch {
+        action = null;
+      }
     }
+
+    if (action) {
+      const result = await executeAction(action);
+      text = result.text;
+      agendamentoCriado = result.appointment;
+
+      if (text.startsWith("AGUARDANDO_PROFISSIONAL:")) {
+        text = `Com qual profissional deseja agendar? Disponíveis: ${text.replace("AGUARDANDO_PROFISSIONAL:", "")}`;
+      } else if (text.startsWith("CONFLITO:")) {
+        text = `Conflito de horário: ${text.replace("CONFLITO:", "")}\nDeseja agendar mesmo assim? Responda \"sim\" ou \"forçar\" para confirmar.`;
+      }
+    } else if (isLikelyActionRequest(msgTrimmed)) {
+      text = stripCodeBlocks(raw) || "Não consegui gerar a ação. Pode repetir o pedido?";
+    } else {
+      text = stripCodeBlocks(raw) || raw;
+    }
+
+    addToHistory("assistant", text);
+    return {
+      texto: text,
+      agendamentoCriado,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-
-    if (message.includes("401")) {
-      return { texto: "Chave da IA inválida.", erro: message };
-    }
-
-    if (message.includes("429")) {
-      return {
-        texto: "Muitas requisições. Tente de novo em instantes.",
-        erro: message,
-      };
-    }
-
     return {
-      texto: "Erro ao processar a mensagem.",
+      texto: `Erro ao processar a mensagem: ${message}`,
       erro: message,
     };
   }
-    }
+}
