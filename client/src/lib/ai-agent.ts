@@ -1153,3 +1153,7 @@ export async function executarAgente(
         erro: message,
       };
     }
+
+    return { texto: "Erro ao processar a mensagem.", erro: message };
+  }
+}
