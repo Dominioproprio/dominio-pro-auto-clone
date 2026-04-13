@@ -73,3 +73,133 @@ const NON_NAME_WORDS = new Set([
   "terca-feira",
   "terça-feira",
   "quarta-feira",
+  "quinta-feira",
+  "horario",
+  "horário",
+  "horas",
+  "hora",
+  "servico",
+  "serviço",
+]);
+
+export const YES =
+  /^(sim|s|ok|confirmo|confirmar|pode|isso|isso mesmo|pode confirmar|confirmado)[.! ]*$/i;
+
+export const NO =
+  /^(nao|não|cancelar|cancela|deixa|deixa pra la|deixa pra lá|negativo)[.! ]*$/i;
+
+export function normalizar(s: string): string {
+  return (s || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getLocalNow(): Date {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+
+  const pick = (type: string) =>
+    parts.find((p) => p.type === type)?.value ?? "00";
+
+  return new Date(
+    `${pick("year")}-${pick("month")}-${pick("day")}T${pick("hour")}:${pick(
+      "minute",
+    )}:${pick("second")}`,
+  );
+}
+
+export function ymd(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+export function parseYMD(dateStr: string): Date {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0);
+}
+
+export function formatDateLong(dateStr: string): string {
+  return parseYMD(dateStr).toLocaleDateString("pt-BR", {
+    weekday: "long",
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: TZ,
+  });
+}
+
+export function extractTime(raw: string): string | undefined {
+  const match = raw.match(/\b(\d{1,2})(?::|h)?(\d{2})?\b/);
+  if (!match) return undefined;
+
+  const hh = Number(match[1]);
+  const mm = Number(match[2] ?? 0);
+
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return undefined;
+
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+export function resolveDateFromText(
+  raw: string,
+  allowPast = false,
+): string | undefined {
+  const input = normalizar(raw);
+  if (!input) return undefined;
+
+  const today = getLocalNow();
+  today.setHours(12, 0, 0, 0);
+
+  if (/\bhoje\b/.test(input)) return ymd(today);
+
+  if (/\bontem\b/.test(input)) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - 1);
+    return allowPast ? ymd(d) : undefined;
+  }
+
+  if (/\bdepois de amanha\b|\bdepois de amanhã\b/.test(input)) {
+    const d = new Date(today);
+    d.setDate(d.getDate() + 2);
+    return ymd(d);
+  }
+
+  if (/\bamanha\b|\bamanhã\b/.test(input)) {
+    const d = new Date(today);
+    d.setDate(d.getDate() + 1);
+    return ymd(d);
+  }
+
+  const iso = input.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+
+  const br = input.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
+  if (br) {
+    const day = Number(br[1]);
+    const month = Number(br[2]);
+    let year = Number(br[3] ?? today.getFullYear());
+
+    if (year < 100) year += 2000;
+
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      const d = new Date(year, month - 1, day, 12, 0, 0);
+      return ymd(d);
+    }
+  }
+
+  const keys = Object.keys(WEEKDAY_SHORT).sort((a, b) => b.length
