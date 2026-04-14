@@ -61,8 +61,36 @@ const FEEDBACK_KEY = "ai_agent_feedback_v1";
 const LLM_PROXY = "/api/llm";
 const GITHUB_LLM_ENDPOINT = "https://models.github.ai/inference/chat/completions";
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
-const HISTORY_LIMIT = 20;
+const HISTORY_LIMIT = 50;
 const TZ = "America/Sao_Paulo";
+
+function toLocalDate(isoString: string): string {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  return formatter.format(new Date(isoString));
+}
+
+function toLocalTime(isoString: string): string {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: TZ,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  return formatter.format(new Date(isoString));
+}
+
+function getLocalNow(): { date: string; time: string } {
+  const now = new Date();
+  return {
+    date: toLocalDate(now.toISOString()),
+    time: toLocalTime(now.toISOString()),
+  };
+}
 
 
 async function ensureBaseLoaded(): Promise<void> {
@@ -168,7 +196,7 @@ function normalizeText(value: string): string {
 }
 
 function getTodayStr(): string {
-  return new Date().toISOString().split("T")[0];
+  return getLocalNow().date;
 }
 
 function getDayOfWeek(dateStr: string): number {
@@ -196,15 +224,16 @@ function normalizeTime(raw: string): string | null {
 }
 
 function resolveDate(raw: string): string {
-  const today = new Date();
+  const { date: todayStr } = getLocalNow();
+  const today = new Date(`${todayStr}T12:00:00`);
   const r = normalizeText(raw);
 
-  if (!r || r === "hoje") return today.toISOString().split("T")[0];
+  if (!r || r === "hoje") return todayStr;
 
   if (r === "amanha") {
     const d = new Date(today);
     d.setDate(today.getDate() + 1);
-    return d.toISOString().split("T")[0];
+    return toLocalDate(d.toISOString());
   }
 
   const dayMap: Record<string, number> = {
@@ -232,7 +261,7 @@ function resolveDate(raw: string): string {
     if (diff <= 0) diff += 7;
     const d = new Date(today);
     d.setDate(today.getDate() + diff);
-    return d.toISOString().split("T")[0];
+    return toLocalDate(d.toISOString());
   }
 
   if (/^\d{1,2}\/\d{1,2}$/.test(r)) {
@@ -253,10 +282,12 @@ function resolveDate(raw: string): string {
 function safeLocalTime(iso: string | null | undefined): string {
   if (!iso) return "";
   try {
-    return new Date(iso).toLocaleTimeString("pt-BR", {
+    return new Intl.DateTimeFormat("pt-BR", {
+      timeZone: TZ,
       hour: "2-digit",
       minute: "2-digit",
-    });
+      hour12: false,
+    }).format(new Date(iso));
   } catch {
     return "";
   }
@@ -1206,7 +1237,14 @@ Se não houver dados suficientes, responda apenas {}.`,
 
 async function handlePendingAction(pending: PendingAction, userMessage: string): Promise<ResultadoAgente | null> {
   if (pending.type === "conflict") {
-    if (/forç|forcar|força|mesmo\s*assim|pode|sim|confirma|confirmar|ok|claro|vai|manda|force|agendar/i.test(userMessage)) {
+    const confirmationPatterns = [
+      /^\s*(sim|s|ok|confirmo|confirmar|pode confirmar|confirmado)\s*[.!]*$/i,
+      /^\s*(força|forçar|mesmo assim|manda)\s*[.!]*$/i,
+    ];
+
+    const isConfirmation = confirmationPatterns.some((p) => p.test(userMessage.trim()));
+
+    if (isConfirmation) {
       clearPendingAction();
       addToHistory("user", userMessage);
       const result = await executeAction(pending.action);
@@ -1273,17 +1311,6 @@ async function handlePendingAction(pending: PendingAction, userMessage: string):
 
 
 
-function loadDraft(): null {
-  return null;
-}
-
-function handleFeedbackMessage(_message: string, _draft: null): ResultadoAgente | null {
-  return null;
-}
-
-function handlePendingLearningAnswer(_message: string): ResultadoAgente | null {
-  return null;
-}
 export function addFeedback(userMessage: string, agentResponse: string, rating: "good" | "bad"): void {
   try {
     const raw = getStorage()?.getItem(FEEDBACK_KEY);
@@ -1313,12 +1340,6 @@ export async function executarAgente(
     if (!msgTrimmed) return { texto: "Envie uma mensagem." };
 
     await ensureBaseLoaded();
-
-    const pendingFeedback = handleFeedbackMessage(msgTrimmed, loadDraft());
-    if (pendingFeedback) return pendingFeedback;
-
-    const pendingLearning = handlePendingLearningAnswer(msgTrimmed);
-    if (pendingLearning) return pendingLearning;
 
     const pending = loadPendingAction();
     if (pending) {
