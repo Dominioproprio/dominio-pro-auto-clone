@@ -1,7 +1,7 @@
 /**
  * HistoricoPage — Log de auditoria com filtros por tipo de entidade.
  */
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { Badge } from "@/components/ui/badge";
@@ -39,6 +39,15 @@ const ENTITY_ICONS: Record<string, React.ElementType> = {
 export default function HistoricoPage() {
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [, forceUpdate] = useState(0);
+
+  useEffect(() => {
+    auditStore.fetchAll()
+      .then(() => forceUpdate(n => n + 1))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
 
   const logs = useMemo(() => {
     const all = auditStore.log(filter === "all" ? undefined : filter);
@@ -75,8 +84,8 @@ export default function HistoricoPage() {
       {logs.length === 0 ? (
         <div className="text-center py-16 text-muted-foreground">
           <History className="w-12 h-12 mx-auto mb-4 opacity-30" />
-          <p className="text-lg font-medium">Nenhum registro encontrado</p>
-          <p className="text-sm mt-1">O histórico será preenchido conforme o uso do sistema</p>
+          <p className="text-lg font-medium">{loading ? "Carregando..." : "Nenhum registro encontrado"}</p>
+          <p className="text-sm mt-1">{loading ? "Buscando histórico..." : "O histórico será preenchido conforme o uso do sistema"}</p>
         </div>
       ) : (
         <Card className="border-border bg-card/50">
